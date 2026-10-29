@@ -24,6 +24,7 @@ MODEL_NAME = "base"
 MODEL_DEVICE = "cpu"
 MODEL_COMPUTE_TYPE = "int8"
 MODEL_TIMESTAMP_TOLERANCE_SECONDS = 0.05
+MODEL_ZERO_DURATION_WORD_SECONDS = 0.01
 
 
 class _WordLike(Protocol):
@@ -254,6 +255,15 @@ class FasterWhisperTranscriptionService:
                 word_text = " ".join(raw_word.word.split())
                 start = raw_word.start
                 end = raw_word.end
+                if _is_finite_number(start) and end == start:
+                    latest_end = duration
+                    if source_duration_seconds is not None:
+                        latest_end = min(
+                            latest_end,
+                            source_duration_seconds - timeline_offset_seconds,
+                        )
+                    if start < latest_end:
+                        end = min(start + MODEL_ZERO_DURATION_WORD_SECONDS, latest_end)
                 if (
                     not word_text
                     or not _is_finite_number(start)
@@ -270,7 +280,7 @@ class FasterWhisperTranscriptionService:
                 ):
                     raise TranscriptionError(
                         "Transcription returned invalid word timestamps",
-                        reason="invalid_response",
+                        reason="invalid_word_timestamps",
                     )
                 previous_word_start = start
                 offset_ms = round(timeline_offset_seconds * 1000)

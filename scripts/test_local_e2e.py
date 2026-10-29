@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -149,6 +150,14 @@ def main() -> int:
         print(message, file=sys.stderr)
         if hint:
             print(hint, file=sys.stderr)
+        if failure:
+            stage = failure.get("stage")
+            code = failure.get("code")
+            if stage in {"setup", "download", "transcription", "planning", "rendering", "saving", "uploading"}:
+                details = [f"stage={stage}"]
+                if isinstance(code, str) and len(code) <= 64 and re.fullmatch(r"[a-z]+(?:[._][a-z]+)*", code):
+                    details.append(f"code={code}")
+                print(f"Diagnostic: {' '.join(details)}", file=sys.stderr)
         return 1
 
     output = result.get("output")

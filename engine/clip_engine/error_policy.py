@@ -76,6 +76,7 @@ def safe_processing_error(error: Exception) -> str:
             "audio_chunk_failed": "Transcription audio preparation failed",
             "audio_chunk_too_large": "Transcription audio chunk exceeded the size limit",
             "missing_word_timestamps": "Transcription response lacked word timestamps",
+            "invalid_word_timestamps": "Local transcription returned invalid word timestamps",
         }.get(getattr(error, "reason", None), "Transcription failed")
     if type(error).__name__ == "RenderingError":
         message = str(error).lower()
@@ -102,7 +103,7 @@ def safe_failure_code(error: Exception) -> str:
             "response_too_large", "source_missing", "audio_extraction_failed",
             "audio_extraction_empty", "audio_missing", "translation_unsupported",
             "audio_duration_unknown", "audio_chunk_failed", "audio_chunk_too_large",
-            "missing_word_timestamps",
+            "missing_word_timestamps", "invalid_word_timestamps",
         }:
             return f"transcription.{reason}"
         return "transcription.unknown"
@@ -135,6 +136,7 @@ def safe_job_error_text(error: str | None) -> str | None:
         "Audio duration could not be determined", "Transcription audio preparation failed",
         "Transcription audio chunk exceeded the size limit",
         "Transcription response lacked word timestamps",
+        "Local transcription returned invalid word timestamps",
         "Video render failed",
     }:
         return error

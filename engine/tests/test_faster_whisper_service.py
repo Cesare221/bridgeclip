@@ -151,6 +151,41 @@ def test_accepts_numpy_word_timestamps():
     assert result.segments[0].words[0].end_time_ms == 250
 
 
+def test_repairs_collapsed_word_timestamp_within_audio_bounds():
+    import numpy as np
+
+    result = FasterWhisperTranscriptionService._convert_result(
+        [
+            make_segment(
+                "a temperatura",
+                [
+                    make_word("a", np.float64(90.48), np.float64(90.48)),
+                    make_word("temperatura", np.float64(90.48), np.float64(90.8)),
+                ],
+            ),
+            make_segment(
+                "energia e",
+                [
+                    make_word("energia", np.float64(190.3), np.float64(190.3)),
+                    make_word("e", np.float64(190.3), np.float64(190.82)),
+                ],
+            ),
+        ],
+        SimpleNamespace(duration=np.float64(225.535), language="pt"),
+        0.0,
+    )
+
+    collapsed_words = [
+        segment.words[0]
+        for segment in result.segments
+    ]
+    assert [
+        (word.start_time_ms, word.end_time_ms)
+        for word in collapsed_words
+    ] == [(90480, 90490), (190300, 190310)]
+    assert result.full_text == "a temperatura energia e"
+
+
 def test_model_is_cached_across_service_instances(tmp_path, monkeypatch):
     audio = tmp_path / "audio.wav"
     audio.touch()
@@ -186,7 +221,7 @@ def test_rejects_invalid_or_out_of_order_word_timestamps(word):
             SimpleNamespace(duration=2.0, language="en"),
             0.0,
         )
-    assert error.value.reason == "invalid_response"
+    assert error.value.reason == "invalid_word_timestamps"
 
 
 def test_rejects_text_without_word_timestamps():
@@ -207,7 +242,32 @@ def test_rejects_timestamps_past_source_duration():
             3.0,
             source_duration_seconds=3.5,
         )
-    assert error.value.reason == "invalid_response"
+    assert error.value.reason == "invalid_word_timestamps"
+
+
+def test_rejects_collapsed_word_at_end_of_audio():
+    with pytest.raises(TranscriptionError) as error:
+        FasterWhisperTranscriptionService._convert_result(
+            [make_segment("Hi.", [make_word("Hi.", 2.0, 2.0)])],
+            SimpleNamespace(duration=2.0, language="en"),
+            0.0,
+        )
+    assert error.value.reason == "invalid_word_timestamps"
+
+
+def test_invalid_word_timestamp_has_local_diagnostic():
+    from clip_engine.error_policy import safe_failure_code, safe_processing_error
+
+    with pytest.raises(TranscriptionError) as error:
+        FasterWhisperTranscriptionService._convert_result(
+            [make_segment("Hi.", [make_word("Hi.", 2.0, 2.0)])],
+            SimpleNamespace(duration=2.0, language="en"),
+            0.0,
+        )
+
+    assert error.value.reason == "invalid_word_timestamps"
+    assert safe_failure_code(error.value) == "transcription.invalid_word_timestamps"
+    assert safe_processing_error(error.value) == "Local transcription returned invalid word timestamps"
 
 
 def test_rejects_invalid_timeline_offset(tmp_path):
