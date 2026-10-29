@@ -103,6 +103,81 @@ class BridgeTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 bridge.validate_config(value)
 
+    def test_local_contract_requires_v4_local_file_and_vertical_output(self):
+        with tempfile.NamedTemporaryFile() as source:
+            config = self.config(contract_version=4, clipping_mode="local", video_url=source.name)
+            self.assertEqual(bridge.validate_config(config), config)
+            invalid = (
+                {**config, "contract_version": 3},
+                {**config, "video_url": "https://example.com/video"},
+                {**config, "video_url": "\\\\server\\share\\video.mp4"},
+                {**config, "aspect_ratio": "16:9"},
+                {**config, "output_dir": "\\\\server\\share\\output"},
+            )
+            for value in invalid:
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    bridge.validate_config(value)
+
+    def test_local_run_needs_no_api_key_and_scrubs_provider_credentials(self):
+        from dataclasses import make_dataclass
+
+        output_type = make_dataclass("Output", [("clips", list)])
+        requests = []
+        guard_modes = []
+
+        class Pipeline:
+            def __init__(self, **kwargs):
+                pass
+
+            async def process_video(self, request):
+                requests.append(request)
+                return types.SimpleNamespace(
+                    status="completed", output=output_type([]), job_id="job-123"
+                )
+
+        observed_environment = []
+
+        def get_settings():
+            observed_environment.append({
+                key: os.environ.get(key)
+                for key in bridge.LOCAL_CREDENTIAL_ENV_VARS
+            })
+            return types.SimpleNamespace(openrouter_api_key=None)
+
+        modules = {
+            "clip_engine.config": types.SimpleNamespace(
+                get_settings=get_settings,
+                get_caption_preset=lambda name: None,
+            ),
+            "clip_engine.bridge_contract": types.SimpleNamespace(BRIDGE_CONTRACT_VERSION=4),
+            "clip_engine.logging_safety": types.SimpleNamespace(install_safe_logging=lambda: None),
+            "clip_engine.services.ai_clipping_pipeline": types.SimpleNamespace(
+                AIClippingPipeline=Pipeline,
+                ClippingJobRequest=lambda **kwargs: kwargs,
+                JobStatus=types.SimpleNamespace(COMPLETED="completed"),
+            ),
+            "network_guard": types.SimpleNamespace(
+                install=lambda **kwargs: guard_modes.append(kwargs)
+            ),
+        }
+
+        with tempfile.NamedTemporaryFile() as source, \
+                patch.dict(sys.modules, modules), \
+                patch.dict(os.environ, {key: "test-secret" for key in bridge.LOCAL_CREDENTIAL_ENV_VARS}), \
+                redirect_stdout(io.StringIO()):
+            config = self.config(
+                contract_version=4,
+                clipping_mode="local",
+                video_url=source.name,
+                include_captions=False,
+            )
+            self.assertTrue(asyncio.run(bridge.run(config)))
+
+        self.assertEqual(observed_environment, [{key: None for key in bridge.LOCAL_CREDENTIAL_ENV_VARS}])
+        self.assertEqual(guard_modes, [{"local_mode": True}])
+        self.assertEqual(requests[-1]["video_url"], source.name)
+        self.assertEqual(requests[-1]["aspect_ratio"], "9:16")
+
     def test_output_and_local_mode_are_set_before_settings_load(self):
         observed = []
         def get_settings():
@@ -254,6 +329,11 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(bridge.describe_failure("Transcription service unavailable")["message"], "OpenRouter could not be reached for transcription.")
         self.assertEqual(bridge.describe_failure("Transcription request rejected by provider")["message"], "OpenRouter rejected the transcription audio request.")
         self.assertEqual(bridge.describe_failure("Transcription response lacked word timestamps")["message"], "OpenRouter returned a transcript without word timestamps.")
+        ollama_failure = bridge.describe_failure("Ollama is unavailable. Start Ollama and install qwen3:1.7b.")
+        self.assertEqual(ollama_failure["message"], "Ollama is unavailable or qwen3:1.7b is not installed.")
+        self.assertIn("does not use a paid API", ollama_failure["hint"])
+        whisper_failure = bridge.describe_failure("The Faster-Whisper base model is not cached locally.")
+        self.assertEqual(whisper_failure["message"], "Faster-Whisper Base is not installed locally.")
         self.assertEqual(bridge.describe_failure("Video render failed")["message"], "Clip rendering failed.")
         self.assertEqual(bridge.describe_failure("Not enough disk space to save clips")["message"],
                          "There is not enough free disk space to finish this video.")

@@ -676,7 +676,7 @@ class Settings(BaseSettings):
     layout_vision_reasoning_effort: str = "low"
 
     # Selected by the desktop bridge per process before settings are loaded.
-    clipping_mode: Literal["quality", "economy", "advanced"] = "quality"
+    clipping_mode: Literal["quality", "economy", "advanced", "local"] = "quality"
     advanced_transcription_model: str = ""
     planner_supports_images: bool = True
     planner_input_price: Optional[float] = None
@@ -699,12 +699,14 @@ class Settings(BaseSettings):
 
     def get_planner_fallback_models(self) -> List[str]:
         """Fallback planner models, excluding blanks and the primary."""
-        if self.clipping_mode == "advanced":
+        if self.clipping_mode in ("advanced", "local"):
             return []
         return self._split_models(self.planner_fallback_models, self.planner_model)
 
     def get_layout_vision_fallback_models(self) -> List[str]:
         """Fallback layout-vision models, excluding blanks and the primary."""
+        if self.clipping_mode == "local":
+            return []
         return self._split_models(self.layout_vision_fallback_models, self.layout_vision_model)
 
     # ============================================================
@@ -812,13 +814,15 @@ class Settings(BaseSettings):
     def max_download_duration_seconds(self) -> int:
         return 21600  # 6 hours max (credit-guarded in API)
 
-    # Transcription uses the same OpenRouter key as planning.
+    # Cloud transcription uses the same OpenRouter key as planning.
     @property
     def transcription_provider(self) -> str:
-        return "openrouter"
+        return "local" if self.clipping_mode == "local" else "openrouter"
 
     @property
     def transcription_model(self) -> str:
+        if self.clipping_mode == "local":
+            return "base"
         if self.clipping_mode == "advanced":
             if not self.advanced_transcription_model:
                 raise ValueError("Choose a transcription model in Advanced mode")

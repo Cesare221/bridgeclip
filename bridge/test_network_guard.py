@@ -32,6 +32,24 @@ class NetworkGuardTests(unittest.TestCase):
         finally:
             sock.close()
 
+    def test_local_mode_allows_only_literal_ollama_endpoint(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            endpoint = ("127.0.0.1", 11434)
+            self.assertEqual(_public_address(sock, endpoint, local_mode=True), endpoint)
+            for address in (
+                ("127.0.0.1", 11435),
+                ("127.0.0.2", 11434),
+                ("8.8.8.8", 443),
+            ):
+                with self.subTest(address=address), self.assertRaises(OSError):
+                    _public_address(sock, address, local_mode=True)
+            with patch.object(socket, "getaddrinfo", side_effect=AssertionError("DNS must not run")), \
+                    self.assertRaises(OSError):
+                _public_address(sock, ("localhost", 11434), local_mode=True)
+        finally:
+            sock.close()
+
     def test_async_connect_checks_and_pins_destination(self):
         addresses = []
 
@@ -51,6 +69,13 @@ class NetworkGuardTests(unittest.TestCase):
                 result = asyncio.run(guarded(None, sock, ("public.example", 443)))
             self.assertEqual(result, ("8.8.8.8", 443))
             self.assertEqual(addresses, [("8.8.8.8", 443)])
+
+            local_guarded = _guard_async_connect(original, local_mode=True)
+            endpoint = ("127.0.0.1", 11434)
+            self.assertEqual(asyncio.run(local_guarded(None, sock, endpoint)), endpoint)
+            with self.assertRaisesRegex(OSError, "External network destinations"):
+                asyncio.run(local_guarded(None, sock, ("8.8.8.8", 443)))
+            self.assertEqual(addresses, [("8.8.8.8", 443), endpoint])
         finally:
             sock.close()
 
@@ -76,6 +101,40 @@ async def check():
                 assert 'Local network destinations are not allowed' in str(error), error
             else:
                 raise AssertionError('Proactor connected to a local TCP destination')
+
+asyncio.run(check())
+"""
+        done = subprocess.run(
+            [sys.executable, "-c", script], cwd=Path(__file__).parent,
+            capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows Proactor test")
+    def test_windows_local_proactor_allows_only_ollama(self):
+        script = """
+import asyncio
+import socket
+from asyncio.proactor_events import BaseProactorEventLoop
+import network_guard
+
+calls = []
+async def record_connect(loop, sock, address):
+    calls.append(address)
+
+BaseProactorEventLoop.sock_connect = record_connect
+network_guard.install(local_mode=True)
+async def check():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    await asyncio.get_running_loop().sock_connect(sock, ('127.0.0.1', 11434))
+    try:
+        await asyncio.get_running_loop().sock_connect(sock, ('8.8.8.8', 443))
+    except OSError:
+        pass
+    else:
+        raise AssertionError('Local mode allowed public network egress')
+    assert calls == [('127.0.0.1', 11434)], calls
+    sock.close()
 
 asyncio.run(check())
 """
@@ -144,6 +203,32 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         assert 'Local network destinations are not allowed' in str(error)
     else:
         raise AssertionError('The guard allowed an arbitrary loopback connection')
+"""
+        done = subprocess.run(
+            [sys.executable, "-c", script], cwd=Path(__file__).parent,
+            capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_installed_local_guard_allows_ollama_but_blocks_external_egress(self):
+        script = """
+import socket
+import network_guard as guard
+
+guard.install(local_mode=True)
+calls = []
+guard._original_connect = lambda sock, address: calls.append(address)
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.connect(('127.0.0.1', 11434))
+assert calls == [('127.0.0.1', 11434)], calls
+for address in (('127.0.0.1', 11435), ('8.8.8.8', 443)):
+    try:
+        sock.connect(address)
+    except OSError:
+        pass
+    else:
+        raise AssertionError(f'Local mode allowed {address!r}')
+assert calls == [('127.0.0.1', 11434)], calls
 """
         done = subprocess.run(
             [sys.executable, "-c", script], cwd=Path(__file__).parent,

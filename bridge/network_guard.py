@@ -1,4 +1,4 @@
-"""Block local and private TCP destinations for the desktop clipping process.
+"""Restrict TCP destinations for the desktop clipping process.
 
 The guard checks the address passed to connect, after DNS resolution. This
 also catches redirects and DNS changes made after the UI's initial URL check.
@@ -12,6 +12,8 @@ import sys
 _original_connect = socket.socket.connect
 _original_connect_ex = socket.socket.connect_ex
 _installed = False
+_installed_local_mode = False
+_OLLAMA_ADDRESS = ("127.0.0.1", 11434)
 
 
 def _internal_socketpair(family=socket.AF_INET, type=socket.SOCK_STREAM, proto=0):
@@ -55,45 +57,61 @@ def _internal_socketpair(family=socket.AF_INET, type=socket.SOCK_STREAM, proto=0
     return server, client
 
 
-def _public_address(sock: socket.socket, address):
+def _public_address(sock: socket.socket, address, local_mode: bool = False):
     if sock.family not in (socket.AF_INET, socket.AF_INET6):
         return address
     if not isinstance(address, tuple) or len(address) < 2:
         raise OSError("Network destination is invalid")
     host, port = address[:2]
+    if (
+        local_mode
+        and sock.family == socket.AF_INET
+        and host == _OLLAMA_ADDRESS[0]
+        and type(port) is int
+        and port == _OLLAMA_ADDRESS[1]
+    ):
+        return address
     try:
         ip = ipaddress.ip_address(host)
         if not ip.is_global:
             raise OSError("Local network destinations are not allowed")
+        if local_mode:
+            raise OSError("External network destinations are not allowed in Local mode")
         return address
     except ValueError:
-        pass
+        if local_mode:
+            raise OSError("External network destinations are not allowed in Local mode") from None
 
     results = socket.getaddrinfo(host, port, sock.family, sock.type, sock.proto)
     if not results:
         raise OSError("Network destination could not be resolved")
     if any(not ipaddress.ip_address(result[4][0]).is_global for result in results):
         raise OSError("Local network destinations are not allowed")
+    if local_mode:
+        raise OSError("External network destinations are not allowed in Local mode")
     return results[0][4]
 
 
-def _guard_async_connect(original):
+def _guard_async_connect(original, local_mode: bool = False):
     async def guarded_sock_connect(loop, sock, address):
-        return await original(loop, sock, _public_address(sock, address))
+        return await original(loop, sock, _public_address(sock, address, local_mode))
 
     return guarded_sock_connect
 
 
-def install() -> None:
-    global _installed
+def install(local_mode: bool = False) -> None:
+    global _installed_local_mode, _installed
     if _installed:
+        if local_mode != _installed_local_mode:
+            raise RuntimeError("The network guard mode cannot change after installation")
         return
+    _installed_local_mode = local_mode
 
     def guarded_connect(sock, address):
-        return _original_connect(sock, _public_address(sock, address))
+        return _original_connect(sock, _public_address(sock, address, local_mode))
 
     def guarded_connect_ex(sock, address):
-        return _original_connect_ex(sock, _public_address(sock, address))
+        return _original_connect_ex(sock, _public_address(sock, address, local_mode))
 
     socket.socket.connect = guarded_connect
     socket.socket.connect_ex = guarded_connect_ex
@@ -109,6 +127,6 @@ def install() -> None:
         from asyncio.proactor_events import BaseProactorEventLoop
 
         BaseProactorEventLoop.sock_connect = _guard_async_connect(
-            BaseProactorEventLoop.sock_connect
+            BaseProactorEventLoop.sock_connect, local_mode
         )
     _installed = True

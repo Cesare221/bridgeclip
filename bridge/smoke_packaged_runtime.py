@@ -24,7 +24,7 @@ def main():
     from clip_engine.services.transcription_service import TranscriptSegment
     import cv2
     import yt_dlp
-    assert BRIDGE_CONTRACT_VERSION == 3 and LayoutAnalyzer().available
+    assert BRIDGE_CONTRACT_VERSION == 4 and LayoutAnalyzer().available
     assert cv2.__version__ and yt_dlp.version.__version__ and callable(run_editor)
     subprocess.run([str(binaries / f"yt-dlp{suffix}"), "--version"], check=True, timeout=20)
     with tempfile.TemporaryDirectory(prefix="BridgeClip packaged smoke ") as temporary:

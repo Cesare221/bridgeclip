@@ -31,11 +31,29 @@ _protocol = None
 
 # Mirrors DURATION_OPTIONS in src/shared/job-contract.ts.
 DURATION_RANGE_IDS = ("xshort", "short", "medium", "long", "xlong", "extended", "feature")
+# Mirror the engine contract while rejecting input before importing the engine.
+SUPPORTED_CONTRACT_VERSIONS = (3, 4)
+LOCAL_CREDENTIAL_ENV_VARS = (
+    "OPENROUTER_API_KEY",
+    "ZERNIO_API_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+)
 
 # Known failure classes -> (message, hint). Raw engine errors can contain
 # request URLs, proxy credentials and local paths, so only these fixed strings
 # reach the UI. First match wins.
 FAILURES = (
+    (("ollama is unavailable", "ollama model qwen3:1.7b is unavailable"),
+     "Ollama is unavailable or qwen3:1.7b is not installed.",
+     "Start Ollama and install qwen3:1.7b before retrying. Local processing does not use a paid API."),
+    (("ollama did not respond", "local ollama request failed", "ollama returned http"),
+     "Ollama could not complete local candidate analysis.",
+     "Check that Ollama is running with qwen3:1.7b available, then retry."),
+    (("faster-whisper base model is not cached locally",),
+     "Faster-Whisper Base is not installed locally.",
+     "Install the model once before starting a Local job. Model downloads do not happen during processing."),
     (("selected planner requires a video with speech",),
      "The selected planning model cannot analyze a video without speech.",
      "Choose a planning model that supports silent-video planning in Advanced mode, or use Quality or Economy."),
@@ -186,6 +204,7 @@ def progress_callback(progress) -> None:
 async def run(config: dict) -> bool:
     """Run the clipping pipeline with the given config."""
     config = validate_config(config)
+    local_mode = config.get("clipping_mode") == "local"
     # Configure before BridgeClip imports: settings are cached by the engine.
     os.environ["LOCAL_MODE"] = "true"
     if config.get("output_dir"):
@@ -199,6 +218,13 @@ async def run(config: dict) -> bool:
     os.environ["YTDLP_NO_PLUGINS"] = "1"
     os.environ["LAYOUT_VISION_ENABLED"] = "true" if config["layout_vision_enabled"] else "false"
     os.environ["CLIPPING_MODE"] = config.get("clipping_mode", "quality")
+    if local_mode:
+        for name in LOCAL_CREDENTIAL_ENV_VARS:
+            os.environ.pop(name, None)
+        os.environ["LAYOUT_VISION_ENABLED"] = "false"
+        os.environ["JEV_ENABLED"] = "false"
+        os.environ["JEV_VISUAL_CONTEXT"] = "false"
+        os.environ["SOURCE_CONTEXT_WEB_RESEARCH"] = "false"
     if config.get("clipping_mode", "quality") == "economy":
         # Each job has its own bridge process, so model choices cannot leak to
         # another queued or concurrent run. Do not fall back to higher-cost planners.
@@ -217,13 +243,13 @@ async def run(config: dict) -> bool:
                 os.environ[name.upper()] = str(config[name])
 
     from network_guard import install as install_network_guard
-    install_network_guard()
+    install_network_guard(local_mode=local_mode)
 
     from clip_engine.logging_safety import install_safe_logging
     install_safe_logging()
 
     from clip_engine.bridge_contract import BRIDGE_CONTRACT_VERSION
-    if config["contract_version"] != BRIDGE_CONTRACT_VERSION:
+    if config["contract_version"] > BRIDGE_CONTRACT_VERSION:
         emit({"type": "error", "message": "The bundled clipping engine is incompatible with this BridgeClip version."})
         return False
 
@@ -237,7 +263,7 @@ async def run(config: dict) -> bool:
     settings = get_settings()
 
     missing = []
-    if not settings.openrouter_api_key:
+    if not local_mode and not settings.openrouter_api_key:
         missing.append("OPENROUTER_API_KEY")
     if missing:
         emit({"type": "error", "message": f"Missing required API keys: {', '.join(missing)}"})
@@ -327,8 +353,13 @@ def validate_config(config: object) -> dict:
     """Reject malformed bridge requests before loading the engine or writing files."""
     if not isinstance(config, dict):
         raise ValueError("Config must be a JSON object")
-    if type(config.get("contract_version")) is not int or config["contract_version"] != 3:
+    if type(config.get("contract_version")) is not int or config["contract_version"] not in SUPPORTED_CONTRACT_VERSIONS:
         raise ValueError("Unsupported clipping engine contract version")
+    clipping_mode = config.get("clipping_mode", "quality")
+    if clipping_mode not in ("quality", "economy", "advanced", "local"):
+        raise ValueError("Invalid clipping mode")
+    if clipping_mode == "local" and config["contract_version"] != 4:
+        raise ValueError("Local mode requires clipping engine contract version 4")
     if type(config.get("layout_vision_enabled")) is not bool:
         raise ValueError("layout_vision_enabled must be a boolean")
     job_id = config.get("job_id")
@@ -337,6 +368,13 @@ def validate_config(config: object) -> dict:
     source = config.get("video_url")
     if not isinstance(source, str) or not source.strip() or len(source) > 8192:
         raise ValueError("A video source is required")
+    if clipping_mode == "local":
+        if (
+            source.startswith(("\\\\", "//"))
+            or not os.path.isabs(source)
+            or not os.path.isfile(source)
+        ):
+            raise ValueError("Local mode requires an existing local video file")
     if not os.path.isfile(source):
         try:
             url = urlsplit(source)
@@ -345,7 +383,12 @@ def validate_config(config: object) -> dict:
         except ValueError:
             raise ValueError("Video source must be a local file or HTTP(S) URL") from None
     output = config.get("output_dir")
-    if output is not None and (not isinstance(output, str) or not os.path.isabs(output) or "\0" in output):
+    if output is not None and (
+        not isinstance(output, str)
+        or not os.path.isabs(output)
+        or "\0" in output
+        or clipping_mode == "local" and output.startswith(("\\\\", "//"))
+    ):
         raise ValueError("Output directory must be an absolute path")
     for field in ("include_captions", "include_title", "auto_clip_count", "layout_vision_enabled", "debug_capture"):
         if field in config and not isinstance(config[field], bool):
@@ -355,8 +398,11 @@ def validate_config(config: object) -> dict:
     count = config.get("max_clips")
     if count is not None and (type(count) is not int or not 1 <= count <= 100):
         raise ValueError("max_clips must be between 1 and 100")
-    if config.get("aspect_ratio", "9:16") not in ("9:16", "16:9"):
+    aspect_ratio = config.get("aspect_ratio", "9:16")
+    if aspect_ratio not in ("9:16", "16:9"):
         raise ValueError("Invalid aspect ratio")
+    if clipping_mode == "local" and aspect_ratio != "9:16":
+        raise ValueError("Local mode only supports 9:16 output")
     if config.get("layout_style", "auto") not in ("auto", "fill", "fit"):
         raise ValueError("Invalid layout style")
     if config.get("pacing", "tight") not in ("tight", "natural"):
@@ -364,10 +410,8 @@ def validate_config(config: object) -> dict:
     speed = config.get("video_speed", 1.0)
     if type(speed) not in (int, float) or not 1 <= speed <= 2:
         raise ValueError("Video speed must be between 1x and 2x")
-    if config.get("clipping_mode", "quality") not in ("quality", "economy", "advanced"):
-        raise ValueError("Invalid clipping mode")
     for field in ("planner_model", "transcription_model"):
-        if config.get("clipping_mode") == "advanced":
+        if clipping_mode == "advanced":
             value = config.get(field)
             if not isinstance(value, str) or len(value) > 120 or not re.fullmatch(r"~?[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:-]*", value):
                 raise ValueError("Choose both models in Advanced mode")
