@@ -9,6 +9,7 @@ from clip_engine.services.ai_clipping_pipeline import AIClippingPipeline
 from clip_engine.services.caption_generator import CaptionGeneratorService
 from clip_engine.services.faster_whisper_service import FasterWhisperTranscriptionService
 from clip_engine.services.intelligence_planner import IntelligencePlannerService
+from clip_engine.services.local_planning import LocalPlanningService
 from clip_engine.services.rendering_service import RenderingService
 from clip_engine.services.s3_upload_service import S3UploadService
 from clip_engine.services.transcription_service import TranscriptionService
@@ -20,6 +21,7 @@ __all__ = [
     "TranscriptionService",
     "FasterWhisperTranscriptionService",
     "IntelligencePlannerService",
+    "LocalPlanningService",
     "CaptionGeneratorService",
     "RenderingService",
     "S3UploadService",
