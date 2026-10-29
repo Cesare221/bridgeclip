@@ -7,6 +7,7 @@ Includes:
 
 from clip_engine.services.ai_clipping_pipeline import AIClippingPipeline
 from clip_engine.services.caption_generator import CaptionGeneratorService
+from clip_engine.services.faster_whisper_service import FasterWhisperTranscriptionService
 from clip_engine.services.intelligence_planner import IntelligencePlannerService
 from clip_engine.services.rendering_service import RenderingService
 from clip_engine.services.s3_upload_service import S3UploadService
@@ -17,6 +18,7 @@ __all__ = [
     "AIClippingPipeline",
     "VideoDownloaderService",
     "TranscriptionService",
+    "FasterWhisperTranscriptionService",
     "IntelligencePlannerService",
     "CaptionGeneratorService",
     "RenderingService",

@@ -21,6 +21,11 @@ Pillow>=10.0
 yt-dlp[default]>=2026.8.19
 PySocks
 
+# Local speech transcription
+faster-whisper==1.2.1
+av==18.1.0
+ctranslate2==4.8.4
+
 # Utilities
 httpx>=0.26.0
 python-json-logger>=2.0.7
