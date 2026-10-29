@@ -18,7 +18,8 @@ import type { Page as PageId } from '../components/Sidebar'
  * is always ready for the next video.
  */
 export function ClipPage({ onNavigate }: { onNavigate: (page: PageId) => void }): React.JSX.Element {
-  const setup = useSetupState()
+  const localMode = useDraftStore((state) => state.clippingMode === 'local')
+  const setup = useSetupState(localMode)
   const startingRef = useRef(false)
   const [starting, setStarting] = useState(false)
   const [startError, setStartError] = useState<string | null>(null)
@@ -30,11 +31,10 @@ export function ClipPage({ onNavigate }: { onNavigate: (page: PageId) => void })
     setStartError(null)
     try {
       const result = await getApi().job.start(config)
-      if (result.error) setStartError(result.error)
-      else if (result.jobId) {
+      if ('error' in result) setStartError(result.error)
+      else {
         // Starting must not depend on an event arriving before navigation.
-        if (result.job) useJobStore.getState().upsert(result.job)
-        else await getApi().job.list().then(useJobStore.getState().hydrate).catch(() => {})
+        useJobStore.getState().upsert(result.job)
         useDraftStore.getState().markStarted({ jobId: result.jobId, source: config.videoUrl, queued: Boolean(result.queued) })
         if (config.workflow === 'review') { useJobStore.getState().focusJob(result.jobId); onNavigate('jobs') }
       }
@@ -52,11 +52,13 @@ export function ClipPage({ onNavigate }: { onNavigate: (page: PageId) => void })
   }, [onNavigate])
 
   const blockedReason =
-    setup.missingKeys.length > 0
-      ? `Add your ${setup.missingKeys.join(' and ')} key${setup.missingKeys.length > 1 ? 's' : ''} above to start.`
-      : setup.toolsOk === false
-        ? 'Fix the missing tools in Settings to start.'
-        : !setup.ready ? 'Checking required tools…' : undefined
+    setup.toolsOk === false
+      ? 'Fix the missing tools in Settings to start.'
+      : setup.toolsOk !== true
+        ? 'Checking required tools…'
+        : !localMode && setup.missingKeys.length > 0
+          ? `Add your ${setup.missingKeys.join(' and ')} key${setup.missingKeys.length > 1 ? 's' : ''} above to start.`
+          : undefined
 
   return (
     <Page width="narrow">
@@ -66,7 +68,7 @@ export function ClipPage({ onNavigate }: { onNavigate: (page: PageId) => void })
         description="Pick a long video and a few options. BridgeClip finds the strongest moments and cuts them into captioned clips."
       />
 
-      <SetupCard className="mt-4" onOpenSettings={() => onNavigate('settings')} />
+      <SetupCard className="mt-4" localMode={localMode} onOpenSettings={() => onNavigate('settings')} />
 
       {startError && (
         <Callout tone="danger" className="mt-3" onDismiss={() => setStartError(null)}>

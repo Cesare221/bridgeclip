@@ -21,7 +21,13 @@ test('each new video requires a workflow, with keyboard selection and guarded na
     ipcMain.removeHandler('job:start')
     ipcMain.handle('job:start', (_event, request) => {
       globalThis.workflowTest.push(request)
-      return { jobId: `workflow-${globalThis.workflowTest.length}`, queued: false }
+      const id = `workflow-${globalThis.workflowTest.length}`
+      const now = new Date().toISOString()
+      return { jobId: id, queued: false, job: {
+        id, revision: 0, request, status: 'running', percent: 0, step: 'Queued',
+        clipsDone: 0, clipsTotal: 0, error: null, errorHint: null, output: null,
+        outputDir: root, queuedAt: now, startedAt: now, finishedAt: null
+      } }
     })
   }, root)
   await page.reload()
@@ -114,7 +120,7 @@ test('each new video requires a workflow, with keyboard selection and guarded na
   assert.equal(await automatic.locator('svg.workflow-illustration').evaluate((svg) => svg.getAnimations({ subtree: true }).length), 0)
   await review.click()
   assert.equal(await review.locator('svg.workflow-illustration').evaluate((svg) => svg.getAnimations({ subtree: true }).length), 0)
-  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(720, 700))
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(720, 700))
   await page.waitForFunction(() => window.innerWidth === 720)
   if (artifacts) await page.screenshot({ path: path.join(artifacts, 'workflow-compact.png') })
   await page.waitForFunction(() => document.documentElement.scrollWidth <= window.innerWidth, null, { timeout: 5000 })

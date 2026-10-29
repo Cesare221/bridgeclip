@@ -3,6 +3,7 @@ import { cn, MOD_KEY, sourceLabel } from '../lib/utils'
 import { useIsWide, useSidebarExpanded, useSidebarStore } from '../store/use-sidebar-store'
 import { useActiveJobs } from '../store/use-job-store'
 import { useSetupState } from '../store/use-settings-store'
+import { useDraftStore } from '../store/use-draft-store'
 import { APP_VERSION } from '../config/brand'
 import { BridgeClipLogo } from './brand/BridgeClipLogo'
 import { ProgressBar } from './ui/ProgressBar'
@@ -220,11 +221,12 @@ function ActiveJobsCard({ expanded, onOpen }: { expanded: boolean; onOpen: () =>
 }
 
 function SetupStatus({ expanded, onOpenSettings }: { expanded: boolean; onOpenSettings: () => void }): React.JSX.Element {
-  const { ready, missingKeys, toolsOk } = useSetupState()
+  const localMode = useDraftStore((state) => state.clippingMode === 'local')
+  const { ready, missingKeys, toolsOk } = useSetupState(localMode)
 
   let tone: 'success' | 'warning' | 'danger' | 'idle' = 'success'
   let label = 'Ready to clip'
-  if (missingKeys.length > 0) {
+  if (!localMode && missingKeys.length > 0) {
     tone = 'warning'
     label = missingKeys.length === 2 ? 'Add API keys' : `Add ${missingKeys[0]} key`
   } else if (toolsOk === false) {

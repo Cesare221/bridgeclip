@@ -5,7 +5,7 @@ import { getBridgeRunnerPath, getEnginePath, preflightCheck, resolvePythonPath, 
 import { createRunRecord, finishRunRecord } from './run-history'
 import { enqueueJob } from './job-manager'
 import { logger } from './logger'
-import { assertMediaPath, isWebUrl } from './security'
+import { assertMediaPath, assertSelectedVideoPath, isWebUrl } from './security'
 import { assertPublicWebUrl } from './network-policy'
 import { validateJobConfig } from './validation'
 import { resolveAdvancedModels } from './openrouter-models'
@@ -31,12 +31,13 @@ export async function startClipJobRequest(request: unknown): Promise<StartJobRes
       config.plannerCapabilities = await resolveAdvancedModels(config.plannerModel!, config.transcriptionModel!)
     }
     if (isWebUrl(config.videoUrl)) await assertPublicWebUrl(config.videoUrl)
+    else if (config.clippingMode === 'local') assertSelectedVideoPath(config.videoUrl)
     else assertMediaPath(config.videoUrl, loadSettings().outputDirectory)
     if (config.bannerChannelUrl) await assertPublicWebUrl(config.bannerChannelUrl)
   } catch (error) { return { error: error instanceof Error ? error.message : 'Invalid job options' } }
   const settings = loadSettings()
 
-  if (!settings.openrouterApiKey) {
+  if (config.clippingMode !== 'local' && !settings.openrouterApiKey) {
     logger.warn('job.start.missingKey', { key: 'OPENROUTER_API_KEY' })
     return { error: 'OpenRouter API key is required for AI clip planning. Go to Settings to add it.' }
   }

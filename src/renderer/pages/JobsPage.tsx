@@ -123,10 +123,9 @@ export function JobsPage({ onNavigate, onViewLibrary }: {
     setError(null)
     try {
       const result = await getApi().job.start(job.request)
-      if (result.error) setError(result.error)
-      else if (result.jobId) {
-        if (result.job) useJobStore.getState().upsert(result.job)
-        else await getApi().job.list().then(useJobStore.getState().hydrate)
+      if ('error' in result) setError(result.error)
+      else {
+        useJobStore.getState().upsert(result.job)
         focusJob(result.jobId)
       }
     } catch (err) {

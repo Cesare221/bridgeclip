@@ -205,7 +205,7 @@ export interface BridgeClipAPI {
   }
   job: {
     /** Queues a clipping run; it starts right away when a slot is free (`queued: false`). */
-    start: (config: ClipJobRequest) => Promise<{ jobId?: string; queued?: boolean; job?: JobSnapshot; error?: string }>
+    start: (config: ClipJobRequest) => Promise<{ jobId: string; queued: boolean; job: JobSnapshot } | { error: string }>
     cancel: (jobId: string) => Promise<boolean>
     /** Every job the main process knows about this session, newest first. */
     list: () => Promise<JobSnapshot[]>

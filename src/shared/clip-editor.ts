@@ -39,6 +39,7 @@ export interface EditorCandidate extends CandidateEdit {
 }
 export interface EditorProject {
   version: 1; revision: number; title: string; duration_ms: number; width: number; height: number
+  provider?: 'local'
   /** Main-owned media generation; absent on projects using the original source. */
   source_id?: string
   preview_id?: string
@@ -197,6 +198,7 @@ export function parseEditorProject(value: unknown): EditorProject {
   if (v.source_id !== undefined && (typeof v.source_id !== 'string' || !/^[a-f0-9]{32}$/.test(v.source_id))) fail()
   if (v.preview_id !== undefined && (typeof v.preview_id !== 'string' || !/^[a-f0-9]{32}$/.test(v.preview_id))) fail()
   if (v.version !== 1 || !['9:16', '16:9'].includes(v.aspect_ratio as string)) fail()
+  if (v.provider !== undefined && v.provider !== 'local') fail()
   const duration = num(v.duration_ms, 100, 24 * 3600000)
   const transcript = arr(v.transcript, 100000).map((row) => { const t = record(row); return { start_ms: num(t.start_ms, 0, duration), end_ms: num(t.end_ms, 0, duration), text: clampText(t.text, 20000) } })
   const ids = new Set<string>()
@@ -230,7 +232,8 @@ export function parseEditorProject(value: unknown): EditorProject {
   if (!candidates.length) fail()
   return { version: 1, revision: num(v.revision, 0, Number.MAX_SAFE_INTEGER), title: clampText(v.title, 1024), duration_ms: duration,
     width: num(v.width, 2, 16384), height: num(v.height, 2, 16384), aspect_ratio: v.aspect_ratio as EditorProject['aspect_ratio'], candidates,
-    transcript, ...(v.preview_id ? { preview_id: v.preview_id as string } : {}), ...(v.frame_preview === true ? { frame_preview: true } : {}), ...(v.media_freed === true ? { media_freed: true } : {}), ...(v.source_id ? { source_id: v.source_id as string } : {}) }
+    transcript, ...(v.provider === 'local' ? { provider: 'local' as const } : {}),
+    ...(v.preview_id ? { preview_id: v.preview_id as string } : {}), ...(v.frame_preview === true ? { frame_preview: true } : {}), ...(v.media_freed === true ? { media_freed: true } : {}), ...(v.source_id ? { source_id: v.source_id as string } : {}) }
 }
 export function candidateEdit(c: CandidateEdit): CandidateEdit {
   const { id, title, ranges, scenes, captions, caption_preset, video_speed, status, caption_edits, caption_suppression_ranges = [], dismissed_camera_markers } = c

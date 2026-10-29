@@ -407,6 +407,14 @@ export function startClipJob(
     send('job:error', payload)
   }
   const envVars = getSettingsForBridge({ ...settings, jevEnabled: config.workflow === 'review' ? 'on' : settings.jevEnabled })
+  if (config.clippingMode === 'local') {
+    for (const key of ['OPENROUTER_API_KEY', 'ZERNIO_API_KEY', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN']) {
+      delete envVars[key]
+    }
+    envVars.SOURCE_CONTEXT_WEB_RESEARCH = 'false'
+    envVars.JEV_ENABLED = 'false'
+    envVars.JEV_VISUAL_CONTEXT = 'false'
+  }
   const enginePath = getEnginePath()
   const bridgePath = getBridgeRunnerPath()
   const pythonPath = resolvePythonPath(enginePath, settings.pythonPath)
@@ -463,7 +471,7 @@ export function startClipJob(
     duration_ranges: config.durationRanges,
     aspect_ratio: config.aspectRatio,
     layout_style: config.layoutStyle || 'auto',
-    layout_vision_enabled: config.clippingMode === 'economy' ? false : config.layoutVision,
+    layout_vision_enabled: config.clippingMode === 'economy' || config.clippingMode === 'local' ? false : config.layoutVision,
     pacing: config.pacing || 'tight',
     video_speed: config.videoSpeed ?? 1,
     include_captions: config.includeCaptions,
@@ -492,6 +500,11 @@ export function startClipJob(
     BRIDGECLIP_WORK_ROOT: jobWorkRoot,
     PYTHONUNBUFFERED: '1',
     PYTHONDONTWRITEBYTECODE: '1'
+  }
+  if (config.clippingMode === 'local') {
+    for (const key of ['OPENROUTER_API_KEY', 'ZERNIO_API_KEY', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN']) {
+      delete spawnEnv[key]
+    }
   }
 
   const ffmpeg = resolveBinary('ffmpeg')

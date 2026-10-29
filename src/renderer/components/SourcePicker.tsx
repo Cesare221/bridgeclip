@@ -13,6 +13,7 @@ interface SourcePickerProps {
   value: string
   onChange: (source: string) => void
   disabled?: boolean
+  localOnly?: boolean
 }
 
 /** Match the main process's HTTP(S) URL requirements before accepting a link. */
@@ -34,7 +35,7 @@ function displaySourceLink(value: string): string {
   }
 }
 
-export function SourcePicker({ value, onChange, disabled }: SourcePickerProps): React.JSX.Element {
+export function SourcePicker({ value, onChange, disabled, localOnly = false }: SourcePickerProps): React.JSX.Element {
   const [pickerError, setPickerError] = useState<string | null>(null)
   const browse = useCallback(async () => {
     try {
@@ -55,7 +56,7 @@ export function SourcePicker({ value, onChange, disabled }: SourcePickerProps): 
     </>
   }
   return <>
-    <DropZone onChange={onChange} onBrowse={browse} disabled={disabled} />
+    <DropZone onChange={onChange} onBrowse={browse} disabled={disabled} localOnly={localOnly} />
     {pickerError && <p role="alert" className="mt-2.5 px-1 text-xs text-danger">{pickerError}</p>}
   </>
 }
@@ -63,11 +64,13 @@ export function SourcePicker({ value, onChange, disabled }: SourcePickerProps): 
 function DropZone({
   onChange,
   onBrowse,
-  disabled
+  disabled,
+  localOnly = false
 }: {
   onChange: (source: string) => void
   onBrowse: () => void
   disabled?: boolean
+  localOnly?: boolean
 }): React.JSX.Element {
   const [dragging, setDragging] = useState(false)
   const [draft, setDraft] = useState('')
@@ -106,6 +109,7 @@ function DropZone({
       }
       return
     }
+    if (localOnly) return
     const text = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain')
     const firstLink = text.split(/\r?\n/).find((line) => line.trim() && !line.trim().startsWith('#'))
     if (firstLink) submitLink(firstLink)
@@ -147,17 +151,27 @@ function DropZone({
         </IconTile>
         <div className="min-w-0">
           <h2 className="truncate text-sm font-semibold text-ink">
-            {dragging ? 'Choose this video in the file picker' : 'Add a long video'}
+            {dragging ? 'Choose this video in the file picker' : localOnly ? 'Add a video from this computer' : 'Add a long video'}
           </h2>
-          <p className="text-xs text-ink-subtle">Drop a video file or link here, or paste a link below.</p>
-          <div role="group" aria-label="Supported video links" className="mt-2 flex flex-wrap items-center gap-2">
-            <Badge icon={<Youtube aria-hidden className="h-3.5 w-3.5 text-[#ff0033]" />}>YouTube</Badge>
-            <Badge icon={<Twitch aria-hidden className="h-3.5 w-3.5 text-[#a970ff]" />}>Twitch VODs</Badge>
-          </div>
+          <p className="text-xs text-ink-subtle">
+            {localOnly ? 'Local mode keeps the video on this computer and never sends it to an API.' : 'Drop a video file or link here, or paste a link below.'}
+          </p>
+          {!localOnly && (
+            <div role="group" aria-label="Supported video links" className="mt-2 flex flex-wrap items-center gap-2">
+              <Badge icon={<Youtube aria-hidden className="h-3.5 w-3.5 text-[#ff0033]" />}>YouTube</Badge>
+              <Badge icon={<Twitch aria-hidden className="h-3.5 w-3.5 text-[#a970ff]" />}>Twitch VODs</Badge>
+            </div>
+          )}
         </div>
       </div>
 
-      <div className="relative mt-3 flex items-center gap-2">
+      {localOnly ? (
+        <div className="relative mt-3">
+          <Button size="lg" variant="secondary" icon={<FolderOpen className="h-4 w-4" />} onClick={onBrowse} disabled={disabled}>
+            Browse local video
+          </Button>
+        </div>
+      ) : <div className="relative mt-3 flex items-center gap-2">
         <TextInput
           inputSize="lg"
           className="min-w-0 flex-1"
@@ -194,7 +208,7 @@ function DropZone({
         <Button size="lg" variant="secondary" icon={<FolderOpen className="h-4 w-4" />} onClick={onBrowse} disabled={disabled}>
           Browse
         </Button>
-      </div>
+      </div>}
       {error && <p id="source-link-error" role="alert" className="relative mt-2 px-1 text-xs text-danger">{error}</p>}
     </div>
   )

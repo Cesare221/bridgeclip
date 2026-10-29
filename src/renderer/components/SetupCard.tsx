@@ -8,11 +8,10 @@ import { Button } from './ui/Button'
 import { IconTile } from './ui/IconTile'
 
 /**
- * First-run setup, inline on the Create page: paste the OpenRouter key here instead of
- * being sent to Settings. Hidden once the OpenRouter key exists and the tools check out.
+ * First-run setup, inline on Create: paid modes need an OpenRouter key; Local does not.
  */
-export function SetupCard({ onOpenSettings, className }: { onOpenSettings: () => void; className?: string }): React.JSX.Element | null {
-  const { missingKeys, toolsOk } = useSetupState()
+export function SetupCard({ onOpenSettings, className, localMode = false }: { onOpenSettings: () => void; className?: string; localMode?: boolean }): React.JSX.Element | null {
+  const { missingKeys, toolsOk } = useSetupState(localMode)
   const toolStatus = useSettingsStore((s) => s.toolStatus)
   const toolError = useSettingsStore((s) => s.toolError)
   const { drafts, setDraft, persist, error } = useApiKeyDrafts()
@@ -22,13 +21,13 @@ export function SetupCard({ onOpenSettings, className }: { onOpenSettings: () =>
         !toolStatus.pythonDeps && 'Clipping dependencies or smart framing',
         !toolStatus.ffmpeg && 'FFmpeg',
         !toolStatus.ffprobe && 'FFprobe',
-        !toolStatus.ytdlp && 'yt-dlp',
+        !localMode && !toolStatus.ytdlp && 'yt-dlp',
         !toolStatus.engine && 'BridgeClip clipping engine',
         !toolStatus.bridgeRunner && 'Bridge runner'
       ].filter(Boolean).join(', ')
     : ''
 
-  if (missingKeys.length > 0) {
+  if (missingKeys.length > 0 && !localMode) {
     return (
       <section
         className={cn(

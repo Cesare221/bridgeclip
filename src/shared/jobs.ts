@@ -7,7 +7,7 @@ export interface ClipJobRequest {
   workflow?: 'automatic' | 'review'
   videoUrl: string
   /** Missing on older queued requests; those retain the original quality mode. */
-  clippingMode?: 'quality' | 'economy' | 'advanced'
+  clippingMode?: 'quality' | 'economy' | 'advanced' | 'local'
   /** Required in Advanced mode; presets choose their own models. */
   plannerModel?: string
   transcriptionModel?: string

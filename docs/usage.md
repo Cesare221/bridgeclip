@@ -22,7 +22,7 @@ Copies run from source, local package builds and apps opened straight from the d
 
 ## Create your first clips
 
-1. Add an [OpenRouter API key](https://openrouter.ai/keys) with available credit in the setup card. A saved key is never shown again; paste a new one to replace it, or choose **Remove key** in Settings.
+1. Add an [OpenRouter API key](https://openrouter.ai/keys) with available credit for Quality, Economy or Advanced. Local mode does not require an API key; see [Local AI mode](local-ai.md) for its one-time model setup.
 2. Open **Create** and use the file picker for a local video, or paste a public YouTube or completed Twitch VOD link. Dropping a local file opens the picker so you can grant access.
 3. Choose **Automatic** for finished exports, or **Review & edit** to adjust candidates in the [editor](editor.md).
 4. Choose format, framing, clip lengths, models and caption style, then generate.
@@ -40,7 +40,7 @@ In **Create**, choose a workflow before continuing: **Automatic · Beginner frie
 
 ### Models
 
-In **Create → Clips**, choose **Quality**, **Economy**, or **Advanced**. Advanced offers searchable OpenRouter model pickers for transcription and clip planning, with model IDs, planning prices and compatibility notes. Both selections are required and appear in Review. Advanced retries the selected models without automatically switching models. Transcription must provide word timestamps; planning must support structured output. See [model selection and transcription](transcription.md).
+In **Create → Clips**, choose **Quality**, **Economy**, **Advanced**, or **Local**. Advanced offers searchable OpenRouter model pickers for transcription and clip planning, with model IDs, planning prices and compatibility notes. Both selections are required and appear in Review. Advanced retries the selected models without automatically switching models. Transcription must provide word timestamps; planning must support structured output. Local uses Faster-Whisper Base and Ollama `qwen3:1.7b` on this computer, accepts only local video files, and selects up to two vertical candidates without paid API calls. See [Local AI mode](local-ai.md) and [model selection and transcription](transcription.md).
 
 ### Framing, captions and speed
 

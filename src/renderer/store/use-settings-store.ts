@@ -108,16 +108,20 @@ function pickSettings(s: ClipSettings): ClipSettings {
 
 export type SetupState = { ready: boolean; missingKeys: string[]; toolsOk: boolean | null }
 
-/** Whether a clip job can start: the OpenRouter key is present and, once the
- *  system check has run, every required tool found. */
-export function useSetupState(): SetupState {
+/** Whether the selected mode can start, with mode-specific keys and tools. */
+export function requiredToolsAvailable(tools: ToolStatus, localMode: boolean): boolean {
+  return tools.python && tools.pythonDeps && tools.ffmpeg && tools.ffprobe &&
+    (localMode || tools.ytdlp) && tools.engine && tools.bridgeRunner
+}
+
+export function useSetupState(localMode = false): SetupState {
   const openrouter = useSettingsStore((s) => s.openrouterConfigured)
   const tools = useSettingsStore((s) => s.toolStatus)
   const toolError = useSettingsStore((s) => s.toolError)
   const checkingTools = useSettingsStore((s) => s.checkingTools)
   const missingKeys = [!openrouter && 'OpenRouter'].filter(Boolean) as string[]
   const toolsOk = toolError ? false : tools
-    ? tools.python && tools.pythonDeps && tools.ffmpeg && tools.ffprobe && tools.ytdlp && tools.engine && tools.bridgeRunner
+    ? requiredToolsAvailable(tools, localMode)
     : null
-  return { ready: missingKeys.length === 0 && toolsOk === true && !checkingTools, missingKeys, toolsOk }
+  return { ready: (localMode || missingKeys.length === 0) && toolsOk === true && !checkingTools, missingKeys, toolsOk }
 }

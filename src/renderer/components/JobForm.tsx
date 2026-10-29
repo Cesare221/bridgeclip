@@ -1,7 +1,7 @@
 import { normalizeVideoSource, twitchSourceError } from '../../shared/video-source'
 import { useEffect, useMemo, type ReactNode } from 'react'
 import { ArrowLeft, ArrowRight, Check, CheckCircle2, Clock3, ListVideo, Minus, Plus, Sparkles } from 'lucide-react'
-import { cn, MOD_KEY, parseTimecode, sourceLabel } from '../lib/utils'
+import { cn, isUrl, MOD_KEY, parseTimecode, sourceLabel } from '../lib/utils'
 import { useDraftStore, type ClipDraft, type WizardStep } from '../store/use-draft-store'
 import { useActiveJobs } from '../store/use-job-store'
 import type { ClipJobRequest } from '../../shared/jobs'
@@ -67,12 +67,12 @@ export function buildJobRequest(draft: ClipDraft, trim: { start: number | null; 
     clippingMode: draft.clippingMode,
     ...(draft.clippingMode === 'advanced' ? { plannerModel: draft.plannerModel, transcriptionModel: draft.transcriptionModel } : {}),
     ...(draft.clipRequest?.trim() ? { clipRequest: draft.clipRequest.trim() } : {}),
-    maxClips: draft.autoClipCount ? null : draft.maxClips,
+    maxClips: draft.autoClipCount ? null : draft.clippingMode === 'local' ? Math.min(2, draft.maxClips) : draft.maxClips,
     autoClipCount: draft.autoClipCount,
     durationRanges: draft.durations.length > 0 ? draft.durations : null,
-    aspectRatio: draft.aspectRatio,
+    aspectRatio: draft.clippingMode === 'local' ? '9:16' : draft.aspectRatio,
     layoutStyle: draft.layoutStyle,
-    layoutVision: draft.clippingMode !== 'economy' && draft.aspectRatio === '9:16' && draft.layoutStyle === 'auto' && draft.layoutVision,
+    layoutVision: draft.clippingMode !== 'economy' && draft.clippingMode !== 'local' && draft.aspectRatio === '9:16' && draft.layoutStyle === 'auto' && draft.layoutVision,
     pacing: draft.pacing,
     videoSpeed: draft.videoSpeed ?? 1,
     includeCaptions: draft.includeCaptions,
@@ -113,7 +113,8 @@ export function JobForm({ onSubmit, onViewJob, blockedReason, submitting, classN
 
   const index = WIZARD_STEPS.findIndex((s) => s.id === step)
   const meta = WIZARD_STEPS[index]
-  const sourceError = twitchSourceError(draft.source)
+  const sourceError = twitchSourceError(draft.source) ??
+    (draft.clippingMode === 'local' && isUrl(draft.source) ? 'Local mode requires a video selected from this computer.' : null)
   const hasSource = Boolean(draft.source.trim()) && !sourceError
   const videoValid = hasSource && draft.workflow !== null && !trim.error
   const modelsValid = draft.clippingMode !== 'advanced' || (isModelId(draft.plannerModel) && isModelId(draft.transcriptionModel))
@@ -164,7 +165,9 @@ export function JobForm({ onSubmit, onViewJob, blockedReason, submitting, classN
       <Panel className="p-4 xl:p-5">
         {step !== 'video' && <div className="mb-3">
           <h2 className="text-sm font-semibold text-ink">{step === 'review' && draft.workflow === 'review' ? 'Ready to find candidates' : meta.title}</h2>
-          <p className="mt-0.5 text-xs text-ink-muted">{step === 'review' && draft.workflow === 'review' ? 'Jev reviews each candidate before the editor opens for your final cut.' : meta.description}</p>
+          <p className="mt-0.5 text-xs text-ink-muted">{step === 'review' && draft.workflow === 'review'
+            ? draft.clippingMode === 'local' ? 'Local AI selects up to two candidates; adjust each cut in the editor without paid API calls.' : 'Jev reviews each candidate before the editor opens for your final cut.'
+            : meta.description}</p>
         </div>}
         {sourceError && <p role="alert" className="text-sm text-danger">{sourceError}</p>}
         {step === 'video' && <VideoStep draft={draft} update={update} trimError={trim.error} disabled={submitting} />}
@@ -256,7 +259,7 @@ function VideoStep({ draft, update, trimError, disabled }: { draft: ClipDraft; u
           <h2 id="video-source-heading" className="text-sm font-semibold text-ink">{WIZARD_STEPS[0].title}</h2>
           <p className="mt-0.5 text-xs text-ink-muted">{WIZARD_STEPS[0].description}</p>
         </div>
-        <SourcePicker value={draft.source} onChange={(source) => update({ source })} disabled={disabled} />
+        <SourcePicker value={draft.source} onChange={(source) => update({ source })} disabled={disabled} localOnly={draft.clippingMode === 'local'} />
       </section>
       <SettingRow
         title="Preferred part of the video"
@@ -310,6 +313,7 @@ export function FormatStep({ draft, update }: { draft: ClipDraft; update: Update
                 aria-checked={selected}
                 tabIndex={selected ? 0 : -1}
                 onKeyDown={onRadioKeyDown}
+                disabled={draft.clippingMode === 'local' && f.id !== '9:16'}
                 onClick={() => update({ aspectRatio: f.id })}
                 className={cn('glass-tile glass-tile-hover flex items-center gap-3 rounded-xl px-3 py-2.5 text-left', selected && 'glass-selected')}
               >
@@ -362,10 +366,13 @@ export function FormatStep({ draft, update }: { draft: ClipDraft; update: Update
               )
             })}
           </div>
+          {draft.layoutStyle === 'auto' && draft.clippingMode === 'local' && (
+            <p className="mt-2 text-2xs text-ink-subtle">Local framing uses on-device analysis only; paid AI vision is disabled.</p>
+          )}
           {draft.layoutStyle === 'auto' && draft.clippingMode === 'economy' && (
             <p className="mt-2 text-2xs text-ink-subtle">AI vision checks are off in Economy mode.</p>
           )}
-          {draft.layoutStyle === 'auto' && draft.clippingMode !== 'economy' && (
+          {draft.layoutStyle === 'auto' && draft.clippingMode !== 'economy' && draft.clippingMode !== 'local' && (
             <SettingRow
               className="mt-2"
               title="Check tricky shots with AI vision"
@@ -379,7 +386,9 @@ export function FormatStep({ draft, update }: { draft: ClipDraft; update: Update
       <Group label="Pacing">
         <SettingRow
           title="Cut dead air"
-          description="Proposes pause and filler cuts. When enabled, Jev checks each removal."
+          description={draft.clippingMode === 'local'
+            ? 'Cuts pauses on this computer; no external reviewer is used.'
+            : 'Proposes pause and filler cuts. When enabled, Jev checks each removal.'}
           control={
             <Switch label="Cut dead air and filler words" checked={draft.pacing === 'tight'} onChange={(on) => update({ pacing: on ? 'tight' : 'natural' })} />
           }
@@ -410,6 +419,8 @@ export function FormatStep({ draft, update }: { draft: ClipDraft; update: Update
 
 export function ClipsStep({ draft, update }: { draft: ClipDraft; update: Update }): React.JSX.Element {
   const jevEnabled = useSettingsStore((s) => s.jevEnabled === 'on')
+  const clipLimit = draft.clippingMode === 'local' ? 2 : MAX_CLIPS
+  const selectedClipLimit = Math.min(clipLimit, draft.maxClips)
   const toggleDuration = (id: string): void => {
     update({ durations: draft.durations.includes(id) ? draft.durations.filter((d) => d !== id) : [...draft.durations, id] })
   }
@@ -428,15 +439,24 @@ export function ClipsStep({ draft, update }: { draft: ClipDraft; update: Update 
         <p id="clip-request-help" className="mt-2 text-2xs text-ink-subtle">Only matching moments are clipped, so you may get fewer clips, or none. Leave blank for the best moments.</p>
       </Group>
       <Group label="Clipping mode">
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3" role="radiogroup" aria-label="Clipping mode">
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4" role="radiogroup" aria-label="Clipping mode">
           {([
             { id: 'quality', label: 'Quality', hint: `GPT-6 Sol planning · ${draft.workflow === 'review' ? 'Jev review required' : `Jev review & repairs ${jevEnabled ? 'enabled' : 'off'}`} · MAI Transcribe 2` },
             { id: 'economy', label: 'Economy', hint: 'GLM 5.3 Flash planning · Whisper Turbo' },
-            { id: 'advanced', label: 'Advanced', hint: 'Choose your OpenRouter models' }
+            { id: 'advanced', label: 'Advanced', hint: 'Choose your OpenRouter models' },
+            { id: 'local', label: 'Local', hint: 'Faster-Whisper + Ollama · no API cost · up to 2 clips' }
           ] as const).map((mode) => {
             const selected = draft.clippingMode === mode.id
             return <button key={mode.id} type="button" role="radio" aria-checked={selected} tabIndex={selected ? 0 : -1}
-              onKeyDown={onRadioKeyDown} onClick={() => update({ clippingMode: mode.id })}
+              onKeyDown={onRadioKeyDown} onClick={() => update({
+                clippingMode: mode.id,
+                ...(mode.id === 'local' ? {
+                  source: isUrl(draft.source) ? '' : draft.source,
+                  aspectRatio: '9:16',
+                  layoutVision: false,
+                  maxClips: Math.min(2, draft.maxClips)
+                } : {})
+              })}
               className={cn('glass-tile glass-tile-hover rounded-xl px-3 py-2.5 text-left', selected && 'glass-selected')}>
               <span className="block text-sm font-medium text-ink">{mode.label}</span>
               <span className="block text-2xs text-ink-subtle">{mode.hint}</span>
@@ -444,7 +464,9 @@ export function ClipsStep({ draft, update }: { draft: ClipDraft; update: Update 
           })}
         </div>
         {draft.clippingMode === 'advanced' ? <AdvancedModels draft={draft} update={update} /> :
-          <p className="mt-2 text-2xs text-ink-subtle">Economy uses lower-cost models and skips paid vision checks. Transcription retries temporary errors and can fall back to Whisper Large V3, then MAI Transcribe 2. Clip choices and captions may be less accurate.</p>}
+          draft.clippingMode === 'local'
+            ? <p className="mt-2 text-2xs text-ink-subtle">Runs on this computer with the cached Faster-Whisper Base model and Ollama qwen3:1.7b. Requires Ollama to be running with that model installed. Only local 9:16 videos are accepted; zero, one, or two complete non-overlapping clips may be selected.</p>
+            : <p className="mt-2 text-2xs text-ink-subtle">Economy uses lower-cost models and skips paid vision checks. Transcription retries temporary errors and can fall back to Whisper Large V3, then MAI Transcribe 2. Clip choices and captions may be less accurate.</p>}
       </Group>
       <Group label="Clip length" aside={draft.durations.length === 0 ? 'Any length' : `${draft.durations.length} selected`}>
         <div className="grid grid-cols-4 gap-1.5 sm:grid-cols-7" role="group" aria-label="Clip length options">
@@ -481,17 +503,17 @@ export function ClipsStep({ draft, update }: { draft: ClipDraft; update: Update 
             <Button
               iconOnly
               aria-label="Fewer clips"
-              onClick={() => update({ maxClips: Math.max(1, draft.maxClips - 1) })}
-              disabled={draft.maxClips <= 1}
+              onClick={() => update({ maxClips: Math.max(1, selectedClipLimit - 1) })}
+              disabled={selectedClipLimit <= 1}
               icon={<Minus className="h-3.5 w-3.5" />}
             />
             <TextInput
               className="flex-1 rounded-full [&_input]:text-center"
               inputMode="numeric"
-              value={String(draft.maxClips)}
+              value={String(selectedClipLimit)}
               onChange={(e) => {
                 const n = parseInt(e.target.value.replace(/\D/g, ''), 10)
-                update({ maxClips: Number.isFinite(n) ? Math.min(MAX_CLIPS, Math.max(1, n)) : 1 })
+                update({ maxClips: Number.isFinite(n) ? Math.min(clipLimit, Math.max(1, n)) : 1 })
               }}
               aria-label="Maximum clips"
               mono
@@ -499,8 +521,8 @@ export function ClipsStep({ draft, update }: { draft: ClipDraft; update: Update 
             <Button
               iconOnly
               aria-label="More clips"
-              onClick={() => update({ maxClips: Math.min(MAX_CLIPS, draft.maxClips + 1) })}
-              disabled={draft.maxClips >= MAX_CLIPS}
+              onClick={() => update({ maxClips: Math.min(clipLimit, selectedClipLimit + 1) })}
+              disabled={selectedClipLimit >= clipLimit}
               icon={<Plus className="h-3.5 w-3.5" />}
             />
           </div>
@@ -551,7 +573,7 @@ function ReviewStep({ draft, trim, onEdit }: {
     ? 'Any length'
     : DURATIONS.filter((d) => draft.durations.includes(d.id)).map((d) => d.range).join(', ')
   const framing = draft.aspectRatio === '9:16'
-    ? `${LAYOUT_STYLES.find((s) => s.id === draft.layoutStyle)?.label ?? 'Smart'} framing${draft.clippingMode !== 'economy' && draft.layoutStyle === 'auto' && draft.layoutVision ? ' · AI vision' : ''}`
+    ? `${LAYOUT_STYLES.find((s) => s.id === draft.layoutStyle)?.label ?? 'Smart'} framing${draft.clippingMode !== 'economy' && draft.clippingMode !== 'local' && draft.layoutStyle === 'auto' && draft.layoutVision ? ' · AI vision' : ''}`
     : 'Whole frame'
   const trimLabel = draft.trimOpen && (trim.start != null || trim.end != null)
     ? ` · ${trim.start != null ? formatSeconds(trim.start) : 'start'} to ${trim.end != null ? formatSeconds(trim.end) : 'end'}`
@@ -563,8 +585,8 @@ function ReviewStep({ draft, trim, onEdit }: {
     { step: 'format', label: 'Format', value: `${FORMATS.find((f) => f.id === draft.aspectRatio)?.label ?? draft.aspectRatio} ${draft.aspectRatio} · ${framing}` },
     { step: 'format', label: 'Pacing', value: draft.workflow === 'review' ? 'Manual · choose your own cuts in the editor' : draft.pacing === 'tight' ? 'Cut dead air' : 'Keep pauses' },
     { step: 'format', label: 'Speed', value: `${draft.videoSpeed ?? 1}×${(draft.videoSpeed ?? 1) === 1 ? ' · Normal' : ' · All exported clips'}` },
-    { step: 'clips', label: 'Mode', value: draft.clippingMode === 'advanced' ? 'Advanced · custom models' : draft.clippingMode === 'economy' ? 'Economy · lower cost' : 'Quality · higher accuracy' },
-    { step: 'clips', label: 'Clips', value: `${lengths}${(draft.videoSpeed ?? 1) > 1 && draft.durations.length > 0 ? ' of source footage' : ''} · ${draft.autoClipCount ? 'AI decides how many' : `Up to ${draft.maxClips}`}` },
+    { step: 'clips', label: 'Mode', value: draft.clippingMode === 'local' ? 'Local · no API cost' : draft.clippingMode === 'advanced' ? 'Advanced · custom models' : draft.clippingMode === 'economy' ? 'Economy · lower cost' : 'Quality · higher accuracy' },
+    { step: 'clips', label: 'Clips', value: `${lengths}${(draft.videoSpeed ?? 1) > 1 && draft.durations.length > 0 ? ' of source footage' : ''} · ${draft.autoClipCount ? draft.clippingMode === 'local' ? 'up to 2' : 'AI decides how many' : `Up to ${draft.clippingMode === 'local' ? Math.min(2, draft.maxClips) : draft.maxClips}`}` },
     { step: 'clips', label: 'What to clip', value: draft.clipRequest?.trim() || 'The best moments' },
     { step: 'captions', label: 'Captions', value: draft.includeCaptions ? CAPTION_PRESET_NAMES[draft.captionPreset] ?? draft.captionPreset : 'Off' }
   ]
@@ -592,7 +614,9 @@ function ReviewStep({ draft, trim, onEdit }: {
           ? `${runningCount} jobs are running. This one waits in the queue and starts automatically.`
           : active.length > 0
             ? `Runs alongside ${active.length} other job${active.length === 1 ? '' : 's'}. Up to ${MAX_PARALLEL_JOBS} run at once.`
-            : 'Runs on this computer. Transcription and clip planning bill your OpenRouter account.'}
+            : draft.clippingMode === 'local'
+              ? 'Runs on this computer. Local transcription and planning do not use paid APIs.'
+              : 'Runs on this computer. Transcription and clip planning bill your OpenRouter account.'}
       </p>
     </div>
   )

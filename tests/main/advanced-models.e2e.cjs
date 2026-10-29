@@ -35,7 +35,15 @@ test('Advanced models and export speed support keyboard selection, review and su
     ipcMain.removeHandler('system:checkTools')
     ipcMain.handle('system:checkTools', () => ({ python: true, pythonDeps: true, ffmpeg: true, ffmpegCaptions: true, ffprobe: true, ytdlp: true, engine: true, bridgeRunner: true }))
     ipcMain.removeHandler('job:start')
-    ipcMain.handle('job:start', (_event, config) => { globalThis.modelTest.submitted = config; return { jobId: 'test-advanced', queued: false } })
+    ipcMain.handle('job:start', (_event, config) => {
+      globalThis.modelTest.submitted = config
+      const now = new Date().toISOString()
+      return { jobId: 'test-advanced', queued: false, job: {
+        id: 'test-advanced', revision: 0, request: config, status: 'running',
+        percent: 0, step: 'Queued', clipsDone: 0, clipsTotal: 0, error: null,
+        errorHint: null, output: null, outputDir: root, queuedAt: now, startedAt: now, finishedAt: null
+      } }
+    })
   }, root)
   await page.reload()
   await page.getByPlaceholder('YouTube, Twitch VOD or direct video link').fill('https://example.com/video.mp4')

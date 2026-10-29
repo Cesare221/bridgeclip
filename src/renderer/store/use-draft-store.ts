@@ -18,7 +18,7 @@ export interface StartedJob {
 export interface ClipDraft {
   workflow: 'automatic' | 'review' | null
   source: string
-  clippingMode: 'quality' | 'economy' | 'advanced'
+  clippingMode: 'quality' | 'economy' | 'advanced' | 'local'
   plannerModel: string
   transcriptionModel: string
   aspectRatio: '9:16' | '16:9'

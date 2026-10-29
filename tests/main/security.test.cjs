@@ -93,12 +93,15 @@ test('media authorization rejects traversal, symlink escapes, and non-media file
     assert.throws(() => security.assertMediaPath(outside, library))
     if (fileLinksAvailable) assert.throws(() => security.assertMediaPath(path.join(library, 'escape.mp4'), library))
     assert.throws(() => security.assertMediaPath(secret, library))
+    assert.throws(() => security.assertSelectedVideoPath(video))
     assert.equal(security.isWithinDirectory(outside, library), false)
     security.authorizeMedia(outside)
     assert.doesNotThrow(() => security.assertMediaPath(outside, library))
+    assert.doesNotThrow(() => security.assertSelectedVideoPath(outside))
     fs.renameSync(outside, path.join(root, 'original.mp4'))
     fs.writeFileSync(outside, '')
     assert.throws(() => security.assertMediaPath(outside, library))
+    assert.throws(() => security.assertSelectedVideoPath(outside))
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -224,6 +227,7 @@ test('the native picker authorizes media and shell opening rejects aliased appli
     assert.throws(() => picker({ sender: contents, senderFrame: {} }), /Unauthorized application request/)
     assert.equal(await picker({ sender: contents, senderFrame: frame }), fs.realpathSync(video))
     assert.doesNotThrow(() => security.assertMediaPath(video, library))
+    assert.doesNotThrow(() => security.assertSelectedVideoPath(video))
     const bundle = path.join(library, 'unsafe.app')
     fs.mkdirSync(bundle)
     const alias = path.join(library, 'ordinary-folder')
@@ -279,6 +283,16 @@ test('job validation rejects malformed options and invalid trim intervals', () =
   }
   assert.doesNotThrow(() => validateJobConfig({ ...job, clippingMode: 'economy' }))
   assert.doesNotThrow(() => validateJobConfig({ ...job, clippingMode: 'quality' }))
+  const local = { ...job, videoUrl: '/tmp/local-video.mp4', clippingMode: 'local', layoutVision: false, maxClips: 2 }
+  assert.doesNotThrow(() => validateJobConfig(local))
+  assert.doesNotThrow(() => validateJobConfig({ ...local, maxClips: null }))
+  for (const patch of [
+    { videoUrl: 'https://example.com/video' },
+    { aspectRatio: '16:9' },
+    { layoutVision: true },
+    { maxClips: 3 },
+    { bannerPlatform: 'youtube' }
+  ]) assert.throws(() => validateJobConfig({ ...local, ...patch }))
   const advanced = { ...job, clippingMode: 'advanced', plannerModel: 'google/gemini-3.8-flash', transcriptionModel: 'openai/whisper-large-v3' }
   assert.doesNotThrow(() => validateJobConfig(advanced))
   assert.equal(validateJobConfig({ ...advanced, plannerCapabilities: { maxOutputTokens: 1e12 } }).plannerCapabilities, undefined)
@@ -653,7 +667,7 @@ test('pipeline preserves split JSON messages and protects the job identity', asy
   assert.equal(forwarded.include_title, true)
   assert.equal(forwarded.clip_request, 'the pricing debate')
   assert.equal(forwarded.debug_capture, undefined)
-  assert.equal(forwarded.contract_version, 3)
+  assert.equal(forwarded.contract_version, 4)
   assert.equal(forwarded.output_dir, '/tmp/queued-output')
   assert.equal(forwarded.clipping_mode, 'advanced')
   assert.equal(forwarded.planner_model, 'custom/planner')

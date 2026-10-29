@@ -33,6 +33,7 @@ export function isWithinDirectory(path: string, directory: string): boolean {
 }
 
 const mediaExtensions = new Set(['.mp4', '.m4v', '.mkv', '.webm', '.avi', '.mov', '.flv', '.jpg', '.jpeg', '.png', '.webp'])
+const videoExtensions = new Set(['.mp4', '.m4v', '.mkv', '.webm', '.avi', '.mov', '.flv'])
 const selectedMedia = new Map<string, { dev: number; ino: number }>()
 export function authorizeMedia(path: string): string {
   const canonical = realpathSync(path)
@@ -42,6 +43,17 @@ export function authorizeMedia(path: string): string {
   }
   selectedMedia.set(canonical, { dev: file.dev, ino: file.ino })
   return canonical
+}
+export function assertSelectedVideoPath(path: unknown): asserts path is string {
+  if (typeof path !== 'string' || !isAbsolute(path) || !videoExtensions.has(extname(path).toLowerCase())) {
+    throw new Error('Choose a video through the native file picker')
+  }
+  const canonical = realpathSync(path)
+  const file = statSync(canonical)
+  const selected = selectedMedia.get(canonical)
+  if (!file.isFile() || !selected || selected.dev !== file.dev || selected.ino !== file.ino) {
+    throw new Error('Choose a video through the native file picker')
+  }
 }
 export function assertMediaPath(path: unknown, outputDirectory: string): asserts path is string {
   if (typeof path !== 'string' || !isAbsolute(path) || !mediaExtensions.has(extname(path).toLowerCase())) {

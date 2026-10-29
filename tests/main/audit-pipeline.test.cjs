@@ -103,6 +103,43 @@ test('the worker gets a minimal environment: no proxies, interpreter hooks or in
   child.emit('close', 1, null)
 })
 
+test('local jobs use contract v4 and strip provider and cloud credentials from the worker environment', () => {
+  const child = fakeChild()
+  let workerInput = ''
+  child.stdin.on('data', (chunk) => { workerInput += chunk.toString() })
+  const hostile = {
+    PATH: '/usr/bin:/bin',
+    OPENROUTER_API_KEY: 'stale-process-key',
+    ZERNIO_API_KEY: 'zernio-process-key',
+    AWS_ACCESS_KEY_ID: 'aws-id',
+    AWS_SECRET_ACCESS_KEY: 'aws-secret',
+    AWS_SESSION_TOKEN: 'aws-session'
+  }
+  let spawned
+  const { runner, window } = startRunner({
+    child,
+    env: hostile,
+    onSpawn: (command, args, options) => { spawned = { command, args, options } }
+  })
+
+  runner.startClipJob('audit-local-job', {
+    videoUrl: path.join(WORK_HOME, 'video.mp4'),
+    clippingMode: 'local',
+    aspectRatio: '9:16',
+    layoutVision: false
+  }, window)
+
+  assert.ok(spawned)
+  const config = JSON.parse(workerInput)
+  assert.equal(config.contract_version, 4)
+  assert.equal(config.clipping_mode, 'local')
+  assert.equal(config.layout_vision_enabled, false)
+  for (const key of ['OPENROUTER_API_KEY', 'ZERNIO_API_KEY', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN']) {
+    assert.equal(spawned.options.env[key], undefined, `${key} must not reach a local worker`)
+  }
+  child.emit('close', 0, null)
+})
+
 test('raw worker output never reaches the renderer, and an oversized line stops the worker', async () => {
   const child = fakeChild()
   const { runner, window, sent, signals } = startRunner({ child })

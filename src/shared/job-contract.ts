@@ -9,8 +9,8 @@ export const DURATION_OPTIONS = [
 ] as const
 
 /** Increment when the desktop bridge and bundled BridgeClip engine job contract change. */
-/** Version 3 adds review projects that must never auto-render. */
-export const BRIDGE_CONTRACT_VERSION = 3
+/** Version 4 adds the offline local provider while preserving v3 requests. */
+export const BRIDGE_CONTRACT_VERSION = 4
 
 /** Longest "What to clip" description sent to the planner. */
 export const CLIP_REQUEST_MAX_CHARS = 1000

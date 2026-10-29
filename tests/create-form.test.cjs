@@ -10,11 +10,12 @@ const bundled = buildSync({
     contents: `export { FormatStep, ClipsStep, CaptionsStep, JobForm, buildJobRequest, parseTrimRange } from './src/renderer/components/JobForm';
       export { JobProgress } from './src/renderer/components/JobProgress';
       export { SetupCard } from './src/renderer/components/SetupCard';
-      export { useSettingsStore } from './src/renderer/store/use-settings-store';
+      export { useSettingsStore, requiredToolsAvailable } from './src/renderer/store/use-settings-store';
       export { useDraftStore } from './src/renderer/store/use-draft-store';
       export { SourcePicker, isValidSourceLink } from './src/renderer/components/SourcePicker';
       export { framingProblem, sourceAnalysisNotice } from './src/renderer/components/ClipList';
       export { parseJobOutput } from './src/shared/job-output';
+      export { parseEditorProject } from './src/shared/clip-editor';
       export { twitchVodId, normalizeVideoSource } from './src/shared/video-source';`,
     resolveDir: path.resolve(__dirname, '..'),
     loader: 'ts'
@@ -31,7 +32,7 @@ const bundled = buildSync({
 
 const form = { exports: {} }
 new Function('module', 'exports', 'require', bundled)(form, form.exports, require)
-const { FormatStep, JobForm, isValidSourceLink, parseTrimRange, framingProblem, sourceAnalysisNotice, parseJobOutput } = form.exports
+const { FormatStep, JobForm, SourcePicker, isValidSourceLink, parseTrimRange, framingProblem, sourceAnalysisNotice, parseJobOutput } = form.exports
 
 test('setup needs only OpenRouter for clipping', () => {
   const { SetupCard, useSettingsStore } = form.exports
@@ -39,7 +40,20 @@ test('setup needs only OpenRouter for clipping', () => {
   const setup = renderToStaticMarkup(React.createElement(SetupCard, { onOpenSettings() {} }))
   assert.match(setup, /OpenRouter/)
   assert.doesNotMatch(setup, /ElevenLabs/)
+  const localSetup = renderToStaticMarkup(React.createElement(SetupCard, { onOpenSettings() {}, localMode: true }))
+  assert.doesNotMatch(localSetup, /Connect OpenRouter/)
   useSettingsStore.setState({ openrouterConfigured: false, toolStatus: null })
+})
+
+test('local setup does not require yt-dlp, which is only used for remote downloads', () => {
+  const { requiredToolsAvailable } = form.exports
+  const tools = {
+    python: true, pythonDeps: true, pythonPath: 'python', pythonError: null,
+    ffmpeg: true, ffmpegCaptions: true, ffprobe: true, ytdlp: false,
+    engine: true, enginePath: 'engine', bridgeRunner: true, bridgePath: 'bridge'
+  }
+  assert.equal(requiredToolsAvailable(tools, true), true)
+  assert.equal(requiredToolsAvailable(tools, false), false)
 })
 
 test('source picker accepts full HTTP(S) links and rejects malformed or credentialed links', () => {
@@ -107,6 +121,32 @@ test('clipping mode is selectable and economy disables paid vision in the submit
   assert.equal(Object.hasOwn(request, 'debugCapture'), false)
   assert.equal(request.layoutVision, false)
   assert.equal(buildJobRequest({ ...draft, clippingMode: 'quality' }, { start: null, end: null }).layoutVision, true)
+})
+
+test('local mode is offline-only, vertical, keyless, and capped at two candidates', () => {
+  const { ClipsStep, buildJobRequest } = form.exports
+  const draft = {
+    workflow: 'review', source: 'C:\\Users\\me\\Videos\\source.mp4', clippingMode: 'local', aspectRatio: '16:9',
+    layoutStyle: 'auto', layoutVision: true, pacing: 'tight', durations: ['short'], autoClipCount: false,
+    maxClips: 8, includeCaptions: true, captionPreset: 'pop'
+  }
+  const html = renderToStaticMarkup(React.createElement(ClipsStep, { draft, update() {} }))
+  const request = buildJobRequest(draft, { start: null, end: null })
+  assert.match(html, /Faster-Whisper \+ Ollama/)
+  assert.match(html, /zero, one, or two complete non-overlapping clips/)
+  assert.match(html, /aria-label="Maximum clips"[^>]*value="2"/)
+  assert.equal(request.clippingMode, 'local')
+  assert.equal(request.videoUrl, draft.source)
+  assert.equal(request.aspectRatio, '9:16')
+  assert.equal(request.layoutVision, false)
+  assert.equal(request.maxClips, 2)
+
+  const localPicker = renderToStaticMarkup(React.createElement(SourcePicker, {
+    value: '', onChange() {}, localOnly: true
+  }))
+  assert.match(localPicker, /Browse local video/)
+  assert.match(localPicker, /never sends it to an API/)
+  assert.doesNotMatch(localPicker, /aria-label="Video link"/)
 })
 
 test('the title card is shown by default and can be turned off for automatic runs', () => {
@@ -194,6 +234,32 @@ test('saved run speed is retained while invalid speed metadata is discarded', ()
   for (const video_speed of ['2', null, Infinity, 0, 3]) {
     assert.equal(parseJobOutput({ clips: [], metrics: { requested_settings: { video_speed } } }).metrics.requested_settings.video_speed, undefined)
   }
+})
+
+test('editor project parsing preserves the optional local provider marker', () => {
+  const { parseEditorProject } = form.exports
+  const project = {
+    version: 1, revision: 0, provider: 'local', title: 'Source', duration_ms: 60000,
+    width: 1920, height: 1080, aspect_ratio: '9:16',
+    transcript: [{ start_ms: 0, end_ms: 35000, text: 'A complete idea.' }],
+    candidates: [{
+      id: 'candidate-1', title: 'A complete idea.', ranges: [[0, 35000]],
+      scenes: [{ at_ms: 0, layout: 'fit', crops: [[0, 0, 1, 1]] }],
+      captions: true, caption_preset: 'pop', video_speed: 1, status: 'refining',
+      caption_edits: [], caption_suppression_ranges: [], score: 93,
+      reason: 'The explanation reaches a clear conclusion.', review: null, exports: []
+    }]
+  }
+  const parsed = parseEditorProject(project)
+  assert.equal(parsed.provider, 'local')
+  assert.equal(parsed.candidates[0].reason, 'The explanation reaches a clear conclusion.')
+  assert.equal(parseEditorProject({ ...project, provider: undefined }).provider, undefined)
+  assert.throws(() => parseEditorProject({ ...project, provider: 'unknown' }))
+})
+
+test('local provider is retained in sanitized run metadata', () => {
+  const local = parseJobOutput({ clips: [], metrics: { requested_settings: { clipping_mode: 'local' } } })
+  assert.equal(local.metrics.requested_settings.clipping_mode, 'local')
 })
 
 test('advanced selections travel with the job while presets ignore retained custom choices', () => {
