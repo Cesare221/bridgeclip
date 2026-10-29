@@ -256,7 +256,7 @@ class LocalPlanningService:
         self,
         transcript_result: TranscriptionResult,
         video_metadata: Any = None,
-        max_clips: int = 2,
+        max_clips: Optional[int] = 2,
         auto_clip_count: bool = True,
         min_duration_seconds: Optional[int] = 30,
         max_duration_seconds: Optional[int] = 60,
@@ -278,6 +278,14 @@ class LocalPlanningService:
         if frames:
             raise LocalPlanningError("Local planning does not support video-frame analysis", reason="unsupported_feature")
         del auto_clip_count, aspect_ratio, source_context
+
+        if max_clips is None:
+            max_clips = MAX_SELECTED_CLIPS
+        if type(max_clips) is not int or max_clips < 0:
+            raise LocalPlanningError("Maximum clip count is invalid", reason="invalid_clip_count")
+        max_clips = min(max_clips, MAX_SELECTED_CLIPS)
+        if not duration_ranges and min_duration_seconds is None and max_duration_seconds is None:
+            min_duration_seconds, max_duration_seconds = 30, 60
 
         transcript = transcript_result.segments if transcript_result else []
         metadata_duration = getattr(video_metadata, "duration_seconds", None)

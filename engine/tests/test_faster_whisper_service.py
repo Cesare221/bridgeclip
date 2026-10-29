@@ -1,4 +1,5 @@
 import asyncio
+import os
 import wave
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -88,6 +89,53 @@ def test_transcribe_audio_converts_word_times_and_source_offset(tmp_path, monkey
         )
     ]
     assert progress == ["Transcribing audio locally...", "Local transcription complete."]
+
+
+def test_video_transcription_reuses_safe_audio_extraction_and_cleans_temp_audio(tmp_path, monkeypatch):
+    from clip_engine.services import faster_whisper_service as module
+    from clip_engine.services.transcription_service import TranscriptionResult
+
+    video = tmp_path / "source.mp4"
+    video.touch()
+    extraction = []
+
+    class Extractor:
+        async def _extract_audio_from_video(self, video_path, audio_path, start, end):
+            extraction.append((video_path, audio_path, start, end))
+            with open(audio_path, "wb"):
+                pass
+
+    service = FasterWhisperTranscriptionService()
+    received = []
+    result = TranscriptionResult(segments=[], full_text="", provider="local")
+
+    async def transcribe_audio(**kwargs):
+        received.append(kwargs)
+        assert os.path.isfile(kwargs["audio_path"])
+        return result
+
+    monkeypatch.setattr(module, "TranscriptionService", Extractor)
+    monkeypatch.setattr(service, "transcribe_audio", transcribe_audio)
+    actual = asyncio.run(
+        service.transcribe(
+            str(video),
+            str(tmp_path),
+            start_seconds=10,
+            end_seconds=20,
+            source_duration_seconds=60,
+        )
+    )
+
+    assert actual is result
+    assert extraction == [(str(video), str(tmp_path / "audio_extracted.wav"), 5.0, 25.0)]
+    assert received == [{
+        "audio_path": str(tmp_path / "audio_extracted.wav"),
+        "language": None,
+        "keyterms": None,
+        "timeline_offset_seconds": 5.0,
+        "source_duration_seconds": 60,
+    }]
+    assert not (tmp_path / "audio_extracted.wav").exists()
 
 
 def test_accepts_numpy_word_timestamps():

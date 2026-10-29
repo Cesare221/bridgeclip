@@ -280,8 +280,14 @@ def test_plan_clips_returns_zero_without_request_when_no_candidates_fit():
     planner = LocalPlanningService(http_client=client)
     result = asyncio.run(
         planner.plan_clips(
-            TranscriptionResult(segments=[], full_text="", duration_seconds=20),
+            TranscriptionResult(
+                segments=transcript_segments(sentence_count=1),
+                full_text="",
+                duration_seconds=20,
+            ),
             video_metadata=SimpleNamespace(duration_seconds=20),
+            min_duration_seconds=None,
+            max_duration_seconds=None,
         )
     )
     asyncio.run(planner.close())

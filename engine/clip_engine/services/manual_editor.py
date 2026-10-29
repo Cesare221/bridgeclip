@@ -165,9 +165,14 @@ def default_crop(w, h, aspect, cx=.5):
     return [max(0, min(1 - cw, cx - cw / 2)), (1 - ch) / 2, cw, ch]
 
 
-async def prepare_project(request, segments, transcript, download, renderer, reviewer, output_dir, progress):
+async def prepare_project(
+    request, segments, transcript, download, renderer, reviewer, output_dir, progress,
+    provider='openrouter',
+):
     if not segments:
         raise NoClipCandidatesError()
+    if provider not in ('openrouter', 'local'):
+        raise ValueError('Invalid project provider')
     w, h = await renderer._get_video_dimensions(download.video_path)
     duration = round(download.metadata.duration_seconds * 1000)
     aspect = 9 / 16 if request.aspect_ratio == '9:16' else 16 / 9
@@ -175,6 +180,8 @@ async def prepare_project(request, segments, transcript, download, renderer, rev
         'duration_ms': duration, 'aspect_ratio': request.aspect_ratio, 'candidates': [],
         'transcript': [{'start_ms': max(0, min(duration, s.start_time_ms)), 'end_ms': max(0, min(duration, s.end_time_ms)),
                         'text': utf16_prefix(s.text, 20000)} for s in transcript]}
+    if provider == 'local':
+        project['provider'] = 'local'
     loop = asyncio.get_running_loop()
     from .run_diagnostics import CURRENT
     diagnostics = CURRENT.get()
@@ -224,19 +231,23 @@ async def prepare_project(request, segments, transcript, download, renderer, rev
                 raise
             except Exception:
                 pass  # Centered framing is editable if detection isn't available.
+        selection = getattr(segment, 'editorial', None) or {}
         c = {'id': f'candidate-{i + 1}', 'title': utf16_prefix(segment.summary or f'Clip {i + 1}', 200),
             'ranges': [[a, b]], 'scenes': scenes, 'score': max(0, min(100, segment.virality_score)),
             'requires_visual_context': bool((getattr(segment, 'moment', None) or {}).get('requires_visual_context')),
-            'reason': utf16_prefix(getattr(segment, 'reasoning', '') or '', 4000), 'captions': request.include_captions,
+            'reason': utf16_prefix(
+                getattr(segment, 'reasoning', '') or selection.get('rationale', ''), 4000
+            ), 'captions': request.include_captions,
             'caption_preset': request.caption_preset, 'video_speed': request.video_speed, 'exports': [], 'review': None,
             'status': 'refining', 'caption_edits': [], 'caption_suppression_ranges': []}
         if plan is not None and getattr(plan, 'camera_scan', None):
             c['camera_scan'] = plan.camera_scan
             c['dismissed_camera_markers'] = []
-        if diagnostics:
-            diagnostics.phase('jev')
-        progress(f'Reviewing candidate {i + 1} of {total} with Jev…', 100 * i / total)
-        await review_candidate(c, reviewer)
+        if provider == 'openrouter':
+            if diagnostics:
+                diagnostics.phase('jev')
+            progress(f'Reviewing candidate {i + 1} of {total} with Jev…', 100 * i / total)
+            await review_candidate(c, reviewer)
         project['candidates'].append(c)
         if diagnostics:
             diagnostics.phase(None)
@@ -451,6 +462,8 @@ async def run_editor(config, progress=None):
             raise ValueError('Invalid source generation')
         await replace_source(run, project, source_id)
         return
+    if config['action'] == 'review' and project.get('provider') == 'local':
+        raise EditorError('review_unavailable', 'Local projects do not support Jev review')
     c = next((c for c in project['candidates'] if c['id'] == config['candidate_id']), None)
     if c is None:
         raise EditorError('project_changed', 'Candidate is missing')

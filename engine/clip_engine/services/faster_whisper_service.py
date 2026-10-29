@@ -12,6 +12,7 @@ from typing import Callable, ClassVar, Iterable, Optional, Protocol
 from clip_engine.services.transcription_service import (
     TranscriptionError,
     TranscriptionResult,
+    TranscriptionService,
     TranscriptSegment,
     TranscriptWord,
     normalize_keyterms,
@@ -66,6 +67,7 @@ class FasterWhisperTranscriptionService:
 
     def __init__(self) -> None:
         self.progress_callback: Optional[Callable[[str], None]] = None
+        self.detail_callback: Optional[Callable[..., None]] = None
 
     def _progress(self, message: str) -> None:
         callback = self.progress_callback
@@ -74,6 +76,53 @@ class FasterWhisperTranscriptionService:
                 callback(message)
             except Exception:
                 logger.warning("Could not report local transcription progress")
+
+    async def transcribe(
+        self,
+        video_path: str,
+        work_dir: str,
+        language: Optional[str] = None,
+        translate_to_english: bool = False,
+        keyterms: Optional[list[str]] = None,
+        start_seconds: Optional[float] = None,
+        end_seconds: Optional[float] = None,
+        source_duration_seconds: Optional[float] = None,
+    ) -> TranscriptionResult:
+        """Match the engine transcription interface while keeping inference offline."""
+        if not os.path.isfile(video_path):
+            raise TranscriptionError("Video file not found", reason="source_missing")
+        if translate_to_english:
+            raise TranscriptionError(
+                "Local transcription does not support translation",
+                reason="unsupported_feature",
+            )
+        window_start = 0.0
+        if start_seconds is not None and start_seconds > 0:
+            window_start = max(0.0, start_seconds - 5.0)
+        window_end = (
+            None
+            if end_seconds is None
+            else max(window_start, end_seconds + 5.0)
+        )
+        audio_path = os.path.join(work_dir, "audio_extracted.wav")
+        self._progress("Preparing audio for local transcription...")
+        extractor = TranscriptionService()
+        try:
+            await extractor._extract_audio_from_video(
+                video_path, audio_path, window_start, window_end
+            )
+            return await self.transcribe_audio(
+                audio_path=audio_path,
+                language=language,
+                keyterms=keyterms,
+                timeline_offset_seconds=window_start,
+                source_duration_seconds=source_duration_seconds,
+            )
+        finally:
+            try:
+                os.remove(audio_path)
+            except FileNotFoundError:
+                pass
 
     async def transcribe_audio(
         self,

@@ -73,6 +73,56 @@ def test_prepare_retains_rejected_candidates_and_does_not_render(tmp_path):
     assert json.loads((out / 'editor-project.json').read_text())['version'] == 1
 
 
+def test_local_prepare_saves_unreviewed_candidate_without_jev(tmp_path):
+    source = tmp_path / 'original.mov'
+    source.write_bytes(b'original source')
+    out = tmp_path / 'run'; out.mkdir()
+    async def preview(src, dest, **kwargs): Path(dest).write_bytes(b'preview')
+    renderer = SimpleNamespace(_get_video_dimensions=AsyncMock(return_value=(1920, 1080)),
+        capture_framing_source=AsyncMock(side_effect=preview), render_clip=AsyncMock())
+    reviewer = SimpleNamespace(judge=AsyncMock())
+    request = SimpleNamespace(aspect_ratio='9:16', layout_style='fit', include_captions=True,
+        caption_preset='pop', video_speed=1)
+    segment = ClipPlanSegment(0, 5000, .93, summary='A complete idea.')
+    segment.editorial = {
+        'provider': 'ollama',
+        'relevance_score': 93,
+        'rationale': 'The explanation reaches a clear conclusion.',
+    }
+
+    project = asyncio.run(prepare_project(
+        request, [segment], transcript(),
+        SimpleNamespace(video_path=str(source), source_type='local',
+            metadata=SimpleNamespace(title='Original', duration_seconds=12)),
+        renderer, reviewer, str(out), lambda *_: None, provider='local',
+    ))
+
+    candidate_data = project['candidates'][0]
+    assert project['provider'] == 'local'
+    assert candidate_data['review'] is None
+    assert candidate_data['status'] == 'refining'
+    assert candidate_data['reason'] == 'The explanation reaches a clear conclusion.'
+    assert candidate_data['score'] == .93
+    reviewer.judge.assert_not_called()
+    renderer.render_clip.assert_not_called()
+
+
+def test_local_editor_rejects_jev_review_action(tmp_path):
+    run = tmp_path / 'local-run'
+    run.mkdir()
+    (run / 'editor-project.json').write_text(json.dumps({
+        'version': 1,
+        'revision': 0,
+        'provider': 'local',
+        'media_freed': False,
+    }))
+
+    with pytest.raises(ValueError) as error:
+        asyncio.run(run_editor({'run': str(run), 'action': 'review', 'revision': 0}))
+
+    assert error.value.editor_code == 'review_unavailable'
+
+
 def test_manual_crop_geometry_and_layout_switches_survive_cut_mapping():
     c = candidate()
     p = manual_plan({'width': 1920, 'height': 1080}, c)

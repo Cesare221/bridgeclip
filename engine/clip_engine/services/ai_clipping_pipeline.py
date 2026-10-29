@@ -60,6 +60,8 @@ from clip_engine.services.transcription_service import (
     TranscriptionResult,
     TranscriptionService,
 )
+from clip_engine.services.faster_whisper_service import FasterWhisperTranscriptionService
+from clip_engine.services.local_planning import LocalPlanningService
 from clip_engine.services.visual_clip_sampling import has_visual_change, sample_visual_planning_frames
 from clip_engine.services.video_downloader import (
     DownloadResult,
@@ -180,12 +182,27 @@ class AIClippingPipeline:
         self.webhook_service = webhook_service or get_webhook_service()
 
         self.video_downloader = VideoDownloaderService()
-        self.transcription_service = TranscriptionService()
+        self.local_provider = self.settings.clipping_mode == "local"
+        if self.local_provider:
+            self.settings.local_mode = True
+            self.settings.layout_vision_enabled = False
+            self.settings.jev_enabled = False
+            self.settings.jev_visual_context = False
+            self.settings.source_context_web_research = False
+        self.transcription_service = (
+            FasterWhisperTranscriptionService()
+            if self.local_provider
+            else TranscriptionService()
+        )
         self.source_context_service = SourceContextService(self.settings)
-        self.intelligence_planner = IntelligencePlannerService()
+        self.intelligence_planner = (
+            LocalPlanningService()
+            if self.local_provider
+            else IntelligencePlannerService()
+        )
         self.rendering_service = RenderingService()
         self.s3_upload_service = S3UploadService()
-        self.local_mode = self.settings.local_mode
+        self.local_mode = self.settings.local_mode or self.local_provider
 
         self._current_callback_url: Optional[str] = None
         self._current_external_job_id: Optional[str] = None
@@ -208,9 +225,21 @@ class AIClippingPipeline:
         loop = asyncio.get_running_loop()
         start_time = time.time()
         job_id = request.job_id
-        jev_enabled = request.workflow == 'review' or getattr(self.settings, 'jev_enabled', False)
-        editorial_service = JevService.from_settings(self.settings, required=request.workflow == 'review')
-        coherence_service = JevService(self.settings.openrouter_api_key if jev_enabled else '', max_requests=256, token_budget=1536000)
+        jev_enabled = not self.local_provider and (
+            request.workflow == 'review' or getattr(self.settings, 'jev_enabled', False)
+        )
+        if self.local_provider:
+            editorial_service = JevService()
+            coherence_service = JevService()
+        else:
+            editorial_service = JevService.from_settings(
+                self.settings, required=request.workflow == 'review'
+            )
+            coherence_service = JevService(
+                self.settings.openrouter_api_key if jev_enabled else '',
+                max_requests=256,
+                token_budget=1536000,
+            )
         work_dir = os.path.join(self.settings.temp_directory, job_id)
         stage_timings: dict[str, float] = {}
         stage_memory_mb: dict[str, float] = {}
@@ -293,7 +322,9 @@ class AIClippingPipeline:
             # speech. It is part of Jev review and of opt-in web research; with
             # both off, automatic clipping plans from the transcript alone.
             source_context = None
-            if jev_enabled or getattr(self.settings, 'source_context_web_research', False):
+            if not self.local_provider and (
+                jev_enabled or getattr(self.settings, 'source_context_web_research', False)
+            ):
                 current_stage = "source_context"
                 self._update_progress(job_id, JobStatus.CONTEXTUALIZING, 12, "Researching the source and building context...")
                 stage_start = time.perf_counter()
@@ -313,6 +344,7 @@ class AIClippingPipeline:
             )
             stage_start = time.perf_counter()
             previous_transcription_progress = getattr(self.transcription_service, "progress_callback", None)
+            previous_detail_callback = getattr(self.transcription_service, "detail_callback", None)
             self.transcription_service.progress_callback = lambda message: self._update_progress(
                 job_id, JobStatus.TRANSCRIBING, 15, message,
             )
@@ -320,12 +352,17 @@ class AIClippingPipeline:
                 job_id, JobStatus.TRANSCRIBING, 15 + 10 * done / total, f'Transcribing audio, part {done + 1} of {total}…',
                 stage_id='transcription', stage_percent=100 * done / total, completed=done, total=total, unit='chunks')
             try:
-                transcription_result = await self.transcription_service.transcribe(
+                transcription_args: dict[str, Any] = dict(
                     video_path=download_result.video_path,
                     work_dir=work_dir,
                     keyterms=transcription_terms(request.keyterms, source_context) if source_context else request.keyterms,
                     start_seconds=None if jev_enabled else request.start_time_seconds,
                     end_seconds=None if jev_enabled else effective_end_time,
+                )
+                if self.local_provider:
+                    transcription_args["source_duration_seconds"] = video_duration
+                transcription_result = await self.transcription_service.transcribe(
+                    **transcription_args
                 )
             except NoAudioTrackError:
                 logger.info("Source has no audio track; trying visual-only planning")
@@ -336,11 +373,11 @@ class AIClippingPipeline:
                     transcription_status = "no_speech"
             finally:
                 self.transcription_service.progress_callback = previous_transcription_progress
-                self.transcription_service.detail_callback = None
+                self.transcription_service.detail_callback = previous_detail_callback
             stage_timings["transcription"] = time.perf_counter() - stage_start
             logger.info(f"Transcription complete: {len(transcription_result.segments)} segments")
 
-            if transcription_status != "available":
+            if transcription_status != "available" and not self.local_provider:
                 self._update_progress(job_id, JobStatus.PLANNING, 25, "Analyzing video frames...")
                 stage_start = time.perf_counter()
                 visual_frames = await sample_visual_planning_frames(
@@ -416,12 +453,78 @@ class AIClippingPipeline:
                 jev_enabled=jev_enabled,
                 clip_request=request.clip_request,
             )
-            clip_plan = await self.intelligence_planner.plan_clips(**planning_args)
+            if self.local_provider:
+                planning_args["max_clips"] = (
+                    2 if request.max_clips is None else min(2, request.max_clips)
+                )
+                previous_planning_progress = self.intelligence_planner.progress_callback
+                self.intelligence_planner.progress_callback = lambda message: self._update_progress(
+                    job_id,
+                    JobStatus.PLANNING,
+                    35,
+                    message,
+                    stage_id="planning",
+                )
+                try:
+                    clip_plan = await self.intelligence_planner.plan_clips(**planning_args)
+                finally:
+                    self.intelligence_planner.progress_callback = previous_planning_progress
+            else:
+                clip_plan = await self.intelligence_planner.plan_clips(**planning_args)
             edit_audit['planner'] = getattr(self.intelligence_planner, 'audit', {'requests': []})
             stage_timings["planning"] = time.perf_counter() - stage_start
             logger.info(f"Planned {len(clip_plan.segments)} clips")
             if not clip_plan.segments:
                 edit_audit['outcome'] = 'no_candidates'
+                save_edit_audit()
+                if self.local_provider:
+                    plan_data = {
+                        "segments": [],
+                        "total_clips": 0,
+                        "target_platform": clip_plan.target_platform,
+                        "insights": clip_plan.insights,
+                        "planning_source": "transcript",
+                    }
+                    plan_url = self._save_local_json(job_id, "plan", plan_data)
+                    output = JobOutput(
+                        job_id=job_id,
+                        source_video_url=request.video_url,
+                        source_video_title=download_result.metadata.title,
+                        source_video_duration_seconds=video_duration,
+                        total_clips=0,
+                        clips=[],
+                        user_id=request.owner_user_id,
+                        transcript_url=transcript_upload.s3_url,
+                        plan_url=plan_url,
+                        processing_time_seconds=time.time() - start_time,
+                        metrics={
+                            "planned_clip_count": 0,
+                            "rendered_clip_count": 0,
+                            "failed_clip_count": 0,
+                            "uploaded_clip_count": 0,
+                            "api_costs": {
+                                "total_estimated_cost_usd": 0.0,
+                                "cost_incomplete": False,
+                            },
+                            "diagnostics": self._diagnostics.snapshot(),
+                            "pipeline_stages": self._stage_progress.update("completed"),
+                        },
+                    )
+                    self._save_local_json(job_id, "job_output", asdict(output))
+                    self._update_progress(
+                        job_id,
+                        JobStatus.COMPLETED,
+                        100,
+                        "No complete local clips matched the selected range.",
+                        clips_completed=0,
+                        total_clips=0,
+                    )
+                    return ClippingJobResult(
+                        job_id=job_id,
+                        status=JobStatus.COMPLETED,
+                        output=output,
+                        processing_time_seconds=time.time() - start_time,
+                    )
                 raise NoRequestedMomentsError() if request.clip_request else NoClipCandidatesError()
             reviewer = CoherenceReviewer(coherence_service, self.settings, transcription_result.segments, round(video_duration * 1000))
             editorial_vision = EditorialVision(self.settings, download_result.video_path, work_dir, round(video_duration * 1000))
@@ -435,7 +538,8 @@ class AIClippingPipeline:
                     download_result, self.rendering_service, reviewer, self._get_local_output_dir(job_id),
                     lambda message, percent=None, stage='preparing': self._update_progress(job_id, JobStatus.PLANNING,
                         {'preparing': 40, 'saving': 80, 'preview': 85}[stage] + (percent or 0) * {'preparing': .4, 'saving': .05, 'preview': .1}[stage], message,
-                        stage_id=stage, stage_percent=percent))
+                        stage_id=stage, stage_percent=percent),
+                    provider="local" if self.local_provider else "openrouter")
                 edit_audit['outcome'] = 'ready_for_review'
                 save_edit_audit()
                 costs = source_context_cost + coherence_service.estimated_cost_usd
@@ -448,7 +552,7 @@ class AIClippingPipeline:
                     total_clips=0, clips=[], editor_project=True, transcript_url=transcript_upload.s3_url,
                     processing_time_seconds=time.time() - start_time,
                     metrics={'planned_clip_count': len(project['candidates']),
-                        'api_costs': {'total_estimated_cost_usd': costs, 'cost_incomplete': True},
+                        'api_costs': {'total_estimated_cost_usd': costs, 'cost_incomplete': not self.local_provider},
                         'diagnostics': self._diagnostics.snapshot(),
                         'pipeline_stages': self._stage_progress.update('completed')})
                 self._save_local_json(job_id, 'job_output', asdict(output))
@@ -466,10 +570,13 @@ class AIClippingPipeline:
                         stage_id="reviewing" if jev_enabled else "planning", stage_percent=None)
                     # Reaction protection and boundary expansion belong to Jev
                     # review; without it, planned clips render as planned.
+                    local_selection = segment.editorial
                     segment.editorial = (
                         analyze_reactions(transcription_result.segments, segment.start_time_ms, segment.end_time_ms)
                         if jev_enabled else empty_report()
                     )
+                    if self.local_provider and local_selection:
+                        segment.editorial["local_selection"] = local_selection
                     entry = {'candidate_index': i, 'title': segment.summary or '', 'discovery_pass': discovery_pass,
                         'original_interval': [segment.start_time_ms, segment.end_time_ms],
                         'clip_index': None, 'status': 'reviewing', 'report': segment.editorial}
@@ -483,8 +590,11 @@ class AIClippingPipeline:
                             segment.start_time_ms, segment.end_time_ms, segment.editorial, 0, round(video_duration * 1000), round(video_duration * 1000))
                     else:
                         # Explicit opt-out bypasses review; provider failures never do.
-                        reviewer.trace(segment.editorial).update(status='skipped', reason='disabled_by_user',
-                            original_interval=entry['original_interval'])
+                        reviewer.trace(segment.editorial).update(
+                            status='skipped',
+                            reason='local_provider' if self.local_provider else 'disabled_by_user',
+                            original_interval=entry['original_interval'],
+                        )
                     if not jev_enabled or await reviewer.prepare(segment, segment.editorial):
                         entry['title'] = segment.summary or ''
                         if any(overlaps([segment.start_time_ms, segment.end_time_ms], [c.start_time_ms, c.end_time_ms]) for c in accepted):
@@ -1125,6 +1235,8 @@ class AIClippingPipeline:
             self._current_callback_url = None
             self._current_external_job_id = None
             self._current_owner_user_id = None
+            if self.local_provider:
+                await self.intelligence_planner.close()
 
 
     def _get_local_output_dir(self, job_id: str) -> str:
