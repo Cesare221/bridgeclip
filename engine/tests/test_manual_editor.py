@@ -101,10 +101,119 @@ def test_local_prepare_saves_unreviewed_candidate_without_jev(tmp_path):
     assert project['provider'] == 'local'
     assert candidate_data['review'] is None
     assert candidate_data['status'] == 'refining'
+    assert candidate_data['local_selection'] == {
+        'decision': 'selected',
+        'narrative_closed': True,
+    }
     assert candidate_data['reason'] == 'The explanation reaches a clear conclusion.'
     assert candidate_data['score'] == .93
     reviewer.judge.assert_not_called()
     renderer.render_clip.assert_not_called()
+
+
+def test_local_export_requires_human_approval_and_rejects_short_ranges(monkeypatch, tmp_path):
+    from dataclasses import asdict
+    from clip_engine.services.rendering_service import RenderResult
+
+    c = {
+        **candidate(),
+        'ranges': [[0, 35_000]],
+        'status': 'refining',
+        'local_selection': {
+            'decision': 'narrative_not_closed',
+            'narrative_closed': False,
+        },
+    }
+    project = {
+        'version': 1,
+        'revision': 0,
+        'provider': 'local',
+        'width': 1920,
+        'height': 1080,
+        'duration_ms': 70_000,
+        'aspect_ratio': '9:16',
+        'candidates': [c],
+        'transcript': [asdict(segment) for segment in transcript()],
+    }
+    (tmp_path / 'editor-project.json').write_text(json.dumps(project))
+    (tmp_path / 'editor-source.mp4').write_bytes(b'original')
+    (tmp_path / 'transcript.json').write_text(json.dumps({'segments': [asdict(s) for s in transcript()]}))
+    (tmp_path / 'job_output.json').write_text(json.dumps({'clips': [], 'total_clips': 0, 'editor_project': True}))
+    monkeypatch.setattr(RenderingService, '_verify_ffmpeg', lambda _: None)
+    render = AsyncMock()
+    monkeypatch.setattr(RenderingService, 'render_clip', render)
+    config = {'run': str(tmp_path), 'revision': 0, 'candidate_id': c['id'], 'action': 'export'}
+
+    with pytest.raises(ValueError, match='Mark this clip ready') as error:
+        asyncio.run(run_editor(config))
+    assert error.value.editor_code == 'not_ready'
+    render.assert_not_called()
+
+    project['candidates'][0]['status'] = 'ready'
+    project['candidates'][0]['ranges'] = [[0, 29_999]]
+    (tmp_path / 'editor-project.json').write_text(json.dumps(project))
+    with pytest.raises(ValueError, match='30 and 60 seconds') as error:
+        asyncio.run(run_editor(config))
+    assert error.value.editor_code == 'invalid_edit'
+    render.assert_not_called()
+
+    project['candidates'][0]['ranges'] = [[0, 35_000]]
+    (tmp_path / 'editor-project.json').write_text(json.dumps(project))
+
+    async def successful_render(self, request):
+        Path(request.output_path).write_bytes(b'final clip')
+        return RenderResult(request.output_path, 10, 35_000)
+
+    monkeypatch.setattr(RenderingService, 'render_clip', successful_render)
+    asyncio.run(run_editor(config))
+    assert (tmp_path / 'clip_00.mp4').read_bytes() == b'final clip'
+
+
+def test_local_export_rejects_overlap_with_previous_candidate(monkeypatch, tmp_path):
+    from dataclasses import asdict
+
+    c = {
+        **candidate(),
+        'ranges': [[20_000, 55_000]],
+        'status': 'ready',
+        'local_selection': {
+            'decision': 'narrative_not_closed',
+            'narrative_closed': False,
+        },
+    }
+    project = {
+        'version': 1,
+        'revision': 0,
+        'provider': 'local',
+        'width': 1920,
+        'height': 1080,
+        'duration_ms': 70_000,
+        'aspect_ratio': '9:16',
+        'candidates': [c],
+        'transcript': [asdict(segment) for segment in transcript()],
+    }
+    (tmp_path / 'editor-project.json').write_text(json.dumps(project))
+    (tmp_path / 'editor-source.mp4').write_bytes(b'original')
+    (tmp_path / 'transcript.json').write_text(json.dumps({'segments': [asdict(s) for s in transcript()]}))
+    (tmp_path / 'job_output.json').write_text(json.dumps({
+        'clips': [{'editor_candidate': 'previous', 'start_time_ms': 0, 'end_time_ms': 35_000}],
+        'total_clips': 1,
+        'editor_project': True,
+    }))
+    monkeypatch.setattr(RenderingService, '_verify_ffmpeg', lambda _: None)
+    render = AsyncMock()
+    monkeypatch.setattr(RenderingService, 'render_clip', render)
+
+    with pytest.raises(ValueError, match='cannot overlap') as error:
+        asyncio.run(run_editor({
+            'run': str(tmp_path),
+            'revision': 0,
+            'candidate_id': c['id'],
+            'action': 'export',
+        }))
+
+    assert error.value.editor_code == 'invalid_edit'
+    render.assert_not_called()
 
 
 def test_local_editor_rejects_jev_review_action(tmp_path):

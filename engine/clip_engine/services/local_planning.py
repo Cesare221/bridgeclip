@@ -231,6 +231,13 @@ def select_non_overlapping_candidates(
     return sorted(best_pair, key=lambda candidate: candidate["start_time_ms"])
 
 
+def _intervals_overlap(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    return (
+        left["start_time_ms"] < right["end_time_ms"]
+        and right["start_time_ms"] < left["end_time_ms"]
+    )
+
+
 class LocalPlanningService:
     """Plan short clips with local candidate generation and Ollama evaluation."""
 
@@ -244,6 +251,7 @@ class LocalPlanningService:
         self._http_client = http_client
         self._owns_http_client = http_client is None
         self.progress_callback = progress_callback
+        self.selection_diagnostics: list[dict[str, Any]] = []
 
     def _progress(self, message: str) -> None:
         if self.progress_callback:
@@ -270,6 +278,7 @@ class LocalPlanningService:
         source_context: Optional[dict] = None,
         jev_enabled: bool = False,
         clip_request: Optional[str] = None,
+        include_preliminary: bool = False,
     ) -> ClipPlanResponse:
         if jev_enabled:
             raise LocalPlanningError("Jev review is unavailable in Local mode", reason="unsupported_feature")
@@ -328,6 +337,7 @@ class LocalPlanningService:
             start_time_seconds=start_time_seconds,
             end_time_seconds=end_time_seconds,
             clip_request=clip_request,
+            include_preliminary=include_preliminary,
         )
         planned = [
             ClipPlanSegment(
@@ -337,7 +347,9 @@ class LocalPlanningService:
                 summary=candidate["rationale"],
                 editorial={
                     "provider": "ollama",
-                    "narrative_closed": True,
+                    "narrative_closed": candidate["narrative_closed"],
+                    "selection_decision": candidate["selection_decision"],
+                    "structural_valid": True,
                     "relevance_score": candidate["relevance_score"],
                     "rationale": candidate["rationale"],
                 },
@@ -366,7 +378,9 @@ class LocalPlanningService:
         start_time_seconds: Optional[float] = None,
         end_time_seconds: Optional[float] = None,
         clip_request: Optional[str] = None,
+        include_preliminary: bool = False,
     ) -> list[dict[str, Any]]:
+        self.selection_diagnostics = []
         min_duration_seconds, max_duration_seconds = resolve_clip_duration_bounds(
             None, min_duration_seconds, max_duration_seconds
         )
@@ -394,10 +408,51 @@ class LocalPlanningService:
         self._progress(f"Evaluating {len(shortlist)} local candidates with Ollama...")
         evaluations = await self._evaluate_candidates(shortlist, clip_request)
         candidates_with_evaluations = [
-            {**candidate, **evaluations[candidate["id"]]}
+            {
+                **candidate,
+                **evaluations[candidate["id"]],
+                "structural_valid": True,
+            }
             for candidate in shortlist
         ]
-        return select_non_overlapping_candidates(candidates_with_evaluations, max_clips)
+        selected = select_non_overlapping_candidates(candidates_with_evaluations, max_clips)
+        selected_ids = {candidate["id"] for candidate in selected}
+        for candidate in candidates_with_evaluations:
+            if candidate["id"] in selected_ids:
+                decision = "selected"
+            elif candidate["narrative_closed"] is not True:
+                decision = "narrative_not_closed"
+            elif any(
+                _intervals_overlap(candidate, chosen)
+                for chosen in selected
+            ):
+                decision = "overlaps_selected_candidate"
+            else:
+                decision = "selection_limit"
+            candidate["selection_decision"] = decision
+        self.selection_diagnostics = [
+            {
+                "id": candidate["id"],
+                "start_time_ms": candidate["start_time_ms"],
+                "end_time_ms": candidate["end_time_ms"],
+                "duration_seconds": candidate["duration_seconds"],
+                "structural_valid": candidate["structural_valid"],
+                "relevance_score": candidate["relevance_score"],
+                "narrative_closed": candidate["narrative_closed"],
+                "decision": candidate["selection_decision"],
+            }
+            for candidate in candidates_with_evaluations
+        ]
+        if include_preliminary:
+            return sorted(
+                candidates_with_evaluations,
+                key=lambda candidate: (
+                    candidate["start_time_ms"],
+                    candidate["end_time_ms"],
+                    candidate["id"],
+                ),
+            )
+        return selected
 
     def _get_http_client(self) -> httpx.AsyncClient:
         if self._http_client is None:

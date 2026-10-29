@@ -457,6 +457,7 @@ class AIClippingPipeline:
                 planning_args["max_clips"] = (
                     2 if request.max_clips is None else min(2, request.max_clips)
                 )
+                planning_args["include_preliminary"] = request.workflow == "review"
                 previous_planning_progress = self.intelligence_planner.progress_callback
                 self.intelligence_planner.progress_callback = lambda message: self._update_progress(
                     job_id,
@@ -472,6 +473,30 @@ class AIClippingPipeline:
             else:
                 clip_plan = await self.intelligence_planner.plan_clips(**planning_args)
             edit_audit['planner'] = getattr(self.intelligence_planner, 'audit', {'requests': []})
+            if self.local_provider:
+                selection_diagnostics = getattr(
+                    self.intelligence_planner, "selection_diagnostics", []
+                )
+                if not isinstance(selection_diagnostics, list):
+                    raise TypeError("Local planner diagnostics must be a list")
+                self._save_local_json(
+                    job_id,
+                    "selection_diagnostics",
+                    {"version": 1, "candidates": selection_diagnostics},
+                )
+                edit_audit["local_selection"] = {
+                    "evaluated_candidates": len(selection_diagnostics),
+                    "selected_candidates": sum(
+                        item.get("decision") == "selected"
+                        for item in selection_diagnostics
+                        if isinstance(item, dict)
+                    ),
+                    "preliminary_candidates": sum(
+                        item.get("decision") != "selected"
+                        for item in selection_diagnostics
+                        if isinstance(item, dict)
+                    ),
+                }
             stage_timings["planning"] = time.perf_counter() - stage_start
             logger.info(f"Planned {len(clip_plan.segments)} clips")
             if not clip_plan.segments:

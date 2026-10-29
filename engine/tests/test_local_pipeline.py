@@ -175,6 +175,7 @@ def test_local_pipeline_completes_without_candidates_or_external_calls(monkeypat
         "cost_incomplete": False,
     }
     assert planner.arguments["max_clips"] == 2
+    assert planner.arguments["include_preliminary"] is False
     assert planner.arguments["jev_enabled"] is False
     assert planner.arguments["frames"] == []
     assert transcriber.arguments["source_duration_seconds"] == 60
@@ -201,6 +202,13 @@ def test_local_review_pipeline_creates_unreviewed_local_editor_project(monkeypat
     FakeJev.instances = []
     transcript = TranscriptSegment(0, 35_000, "A complete local story.")
     candidate = ClipPlanSegment(0, 35_000, 0.9, summary="A complete local story.")
+    candidate.editorial = {
+        "provider": "ollama",
+        "narrative_closed": False,
+        "selection_decision": "narrative_not_closed",
+        "relevance_score": 90,
+        "rationale": "Preliminary candidate for human review.",
+    }
     pipeline, _, planner, _ = build_pipeline(
         monkeypatch,
         tmp_path,
@@ -223,11 +231,21 @@ def test_local_review_pipeline_creates_unreviewed_local_editor_project(monkeypat
 
     assert result.status == JobStatus.COMPLETED
     assert result.output.editor_project is True
+    assert planner.arguments["include_preliminary"] is True
     assert planner.arguments["jev_enabled"] is False
     assert len(FakeJev.instances) == 2
     assert all(service.requests == 0 for service in FakeJev.instances)
     assert FakeContextService.calls == 0
     assert FakeS3Service.calls == 0
+    project = json.loads(
+        (tmp_path / "output" / "local-review" / "editor-project.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert project["candidates"][0]["local_selection"] == {
+        "decision": "narrative_not_closed",
+        "narrative_closed": False,
+    }
     project_path = tmp_path / "output" / "local-review" / "editor-project.json"
     assert project_path.is_file()
     project = json.loads(project_path.read_text(encoding="utf-8"))

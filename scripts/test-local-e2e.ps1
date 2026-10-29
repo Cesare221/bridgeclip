@@ -2,7 +2,9 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$VideoPath,
-    [string]$OutputDirectory
+    [string]$OutputDirectory,
+    [ValidateSet('automatic', 'review')]
+    [string]$Workflow = 'automatic'
 )
 
 $repository = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -16,7 +18,7 @@ if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
     throw 'The engine virtual environment is missing. Create engine\.venv and install engine\requirements.lock first.'
 }
 
-$arguments = @($harness, '--video', (Resolve-Path -LiteralPath $VideoPath).Path)
+$arguments = @($harness, '--video', (Resolve-Path -LiteralPath $VideoPath).Path, '--workflow', $Workflow)
 if ($OutputDirectory) {
     $arguments += @('--output', $OutputDirectory)
 }

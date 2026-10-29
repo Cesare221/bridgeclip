@@ -247,14 +247,19 @@ test('editor project parsing preserves the optional local provider marker', () =
       scenes: [{ at_ms: 0, layout: 'fit', crops: [[0, 0, 1, 1]] }],
       captions: true, caption_preset: 'pop', video_speed: 1, status: 'refining',
       caption_edits: [], caption_suppression_ranges: [], score: 93,
+      local_selection: { decision: 'narrative_not_closed', narrative_closed: false },
       reason: 'The explanation reaches a clear conclusion.', review: null, exports: []
     }]
   }
   const parsed = parseEditorProject(project)
   assert.equal(parsed.provider, 'local')
   assert.equal(parsed.candidates[0].reason, 'The explanation reaches a clear conclusion.')
+  assert.deepEqual(parsed.candidates[0].local_selection, { decision: 'narrative_not_closed', narrative_closed: false })
   assert.equal(parseEditorProject({ ...project, provider: undefined }).provider, undefined)
   assert.throws(() => parseEditorProject({ ...project, provider: 'unknown' }))
+  const invalidSelection = structuredClone(project)
+  invalidSelection.candidates[0].local_selection.narrative_closed = 'false'
+  assert.throws(() => parseEditorProject(invalidSelection))
 })
 
 test('local provider is retained in sanitized run metadata', () => {

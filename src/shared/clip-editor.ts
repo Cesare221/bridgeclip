@@ -20,6 +20,11 @@ export interface EditorReview {
   signature: string; reviewed_at: string; decision: string; questions: EditorQuestion[]
   cuts: { interval: EditorRange; questions: EditorQuestion[] }[]
 }
+export type LocalSelectionDecision = 'selected' | 'narrative_not_closed' | 'overlaps_selected_candidate' | 'selection_limit'
+export interface LocalSelection {
+  decision: LocalSelectionDecision
+  narrative_closed: boolean
+}
 export interface CandidateEdit {
   id: string; title: string; ranges: EditorRange[]; scenes: EditorScene[]
   captions: boolean; caption_preset: string; video_speed: number
@@ -33,6 +38,7 @@ export interface CandidateEdit {
 }
 export interface EditorCandidate extends CandidateEdit {
   camera_scan?: CameraScan
+  local_selection?: LocalSelection
   requires_visual_context?: boolean; score: number; reason: string; review: EditorReview | null; exports: number[]
   /** Main-owned: SHA-256 of the last baked render identity, so undoing "Refine again" can restore Baked. */
   baked_hash?: string
@@ -226,7 +232,18 @@ export function parseEditorProject(value: unknown): EditorProject {
       camera_scan = { start_ms, end_ms, frames, markers }
     }
     const baked_hash = typeof c.baked_hash === 'string' && /^[a-f0-9]{64}$/.test(c.baked_hash) ? c.baked_hash : undefined
-    return { ...edit, ...(camera_scan ? { camera_scan } : {}), ...(baked_hash ? { baked_hash } : {}), requires_visual_context: c.requires_visual_context === true, score: num(c.score, 0, 100), reason: clampText(c.reason, 4000), review,
+    let local_selection: LocalSelection | undefined
+    if (c.local_selection !== undefined) {
+      const selection = record(c.local_selection)
+      const decisions: LocalSelectionDecision[] = ['selected', 'narrative_not_closed', 'overlaps_selected_candidate', 'selection_limit']
+      const narrativeClosed = typeof selection.narrative_closed === 'boolean' ? selection.narrative_closed : fail()
+      if (!decisions.includes(selection.decision as LocalSelectionDecision)) fail()
+      local_selection = {
+        decision: selection.decision as LocalSelectionDecision,
+        narrative_closed: narrativeClosed,
+      }
+    }
+    return { ...edit, ...(camera_scan ? { camera_scan } : {}), ...(local_selection ? { local_selection } : {}), ...(baked_hash ? { baked_hash } : {}), requires_visual_context: c.requires_visual_context === true, score: num(c.score, 0, 100), reason: clampText(c.reason, 4000), review,
       exports: arr(c.exports, 1000).map((n) => num(n, 0, 999)) }
   })
   if (!candidates.length) fail()

@@ -21,7 +21,21 @@ const labels: Record<string, string> = { not_sponsored: 'Not sponsored', opening
 const clock = (n: number): string => `${formatTimecode(n)}.${String(Math.floor(n % 1000)).padStart(3, '0')}`
 const cropCorners: CropCorner[] = ['top-left', 'top-right', 'bottom-left', 'bottom-right']
 const statusLabels = { refining: 'Refining', ready: 'Ready', baked: 'Baked', discarded: 'Discarded' }
+const localDecisionLabels = {
+  selected: 'Selected by local AI · awaiting your approval',
+  narrative_not_closed: 'Preliminary · not approved by AI (narrative incomplete)',
+  overlaps_selected_candidate: 'Preliminary · not selected automatically (overlaps selected cut)',
+  selection_limit: 'Preliminary · not selected automatically (selection limit reached)'
+}
+const localDecisionLabel = (candidate: EditorCandidate): string => {
+  if (!candidate.local_selection) return 'Selected by local AI'
+  if (candidate.local_selection.decision === 'selected' && candidate.status !== 'refining') return 'Selected by local AI · approved by you'
+  return localDecisionLabels[candidate.local_selection.decision]
+}
 const formatBytes = (n: number): string => n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(n / 1e6))} MB`
+function rangesOverlap(left: EditorRange[], right: EditorRange[]): boolean {
+  return left.some(([start, end]) => right.some(([otherStart, otherEnd]) => start < otherEnd && otherStart < end))
+}
 const reviewCurrent = (c: EditorCandidate): boolean => {
   try { return JSON.stringify(JSON.parse(c.review?.signature ?? 'null')) === editSignature(c) } catch { return false }
 }
@@ -89,6 +103,9 @@ export function ClipEditor({ outputDir, leading, onExports }: { outputDir: strin
   const activeTranscript = session?.project.transcript.find((r) => time >= r.start_ms && time < r.end_ms)
   const candidate = edits[selected]
   const localProvider = session?.project.provider === 'local'
+  const localDurationInvalid = !!localProvider && !!candidate && (editDuration(candidate) < 30_000 || editDuration(candidate) > 60_000)
+  const localApprovalOverlap = !!localProvider && !!candidate && edits.some((other, index) =>
+    index !== selected && (other.status === 'ready' || other.status === 'baked') && rangesOverlap(candidate.ranges, other.ranges))
   const candidateRef = useRef(candidate); candidateRef.current = candidate
   const frames = candidate?.camera_scan?.frames ?? []
   const currentScene = candidate ? sceneAt(candidate, time) : null
@@ -513,10 +530,10 @@ export function ClipEditor({ outputDir, leading, onExports }: { outputDir: strin
     <div className="px-[18px]"><SavedStageTimings outputDir={outputDir} /></div>
     <div className="editor-stagebar">
       <span className={cn('editor-status', status)}>{status === 'baked' || status === 'ready' ? <Check size={12} /> : status === 'discarded' ? <Archive size={12} /> : <Pencil size={12} />}{statusLabels[status]}</span>
-      <span className="editor-stage-hint">{status === 'refining' ? 'Review the cut, framing and captions.' : status === 'ready' ? 'Ready for the final render.' : status === 'baked' ? 'Your finished clip is in Exports.' : 'Set aside. Restore it whenever you need.'}</span>
+      <span className="editor-stage-hint">{status === 'refining' && localDurationInvalid ? 'Local clips must remain between 30 and 60 seconds.' : status === 'refining' && localApprovalOverlap ? 'Adjust this cut so it does not overlap another approved clip.' : status === 'refining' ? 'Review the cut, framing and captions.' : status === 'ready' ? 'Ready for the final render.' : status === 'baked' ? 'Your finished clip is in Exports.' : 'Set aside. Restore it whenever you need.'}</span>
       <div className="ml-auto flex gap-2">
         {status !== 'discarded' && <Button variant="ghost" size="sm" disabled={!!busy} icon={<Archive size={13} />} onClick={() => { video.current?.pause(); setEditingCaption(null); change({ status: 'discarded' }) }}>Discard</Button>}
-        {status === 'refining' ? <Button size="sm" variant="primary" disabled={!!busy} icon={<Check size={13} />} onClick={() => { setEditingCaption(null); change({ status: 'ready' }) }}>Mark ready</Button>
+        {status === 'refining' ? <Button size="sm" variant="primary" disabled={!!busy || (localProvider && (localDurationInvalid || localApprovalOverlap))} icon={<Check size={13} />} onClick={() => { setEditingCaption(null); change({ status: 'ready' }) }}>{localProvider ? 'Approve & mark ready' : 'Mark ready'}</Button>
           : <Button size="sm" disabled={!!busy} icon={<RotateCcw size={13} />} onClick={() => change({ status: 'refining' })}>{status === 'discarded' ? 'Restore clip' : status === 'baked' ? 'Refine again' : 'Keep refining'}</Button>}
       </div>
     </div>
@@ -542,7 +559,7 @@ export function ClipEditor({ outputDir, leading, onExports }: { outputDir: strin
           if (!items.length) return null
           const cards = items.map(({ c, i }) => <button key={c.id} className={cn('editor-candidate', group, i === selected && 'selected')} onClick={() => setSelected(i)}>
             <span className="flex items-center justify-between text-2xs text-ink-subtle"><span>{String(i + 1).padStart(2, '0')}</span>{c.exports.length > 0 && <span title={`${c.exports.length} saved exports`} className="flex items-center gap-1"><Download size={11} />{c.exports.length}</span>}</span>
-            <span className="block text-xs leading-relaxed mt-1">{c.title}</span><span className="flex items-center justify-between mt-2 text-2xs text-ink-subtle"><span>{formatTimecode(c.ranges[0][0])} · {(editDuration(c) / 1000).toFixed(1)}s</span><span title={!reviewCurrent(c) ? 'Jev review out of date' : c.review?.decision === 'passes' ? 'Jev checks passed' : 'Jev: consider before baking'} className={cn('editor-dot', !reviewCurrent(c) ? 'bg-ink-subtle' : c.review?.decision === 'passes' ? 'bg-success' : 'bg-warning')} /></span>
+            <span className="block text-xs leading-relaxed mt-1">{c.title}</span>{localProvider && c.local_selection && <span className={cn('mt-1 block text-2xs', c.local_selection.decision === 'selected' ? 'text-success' : 'text-warning')}>{localDecisionLabel(c)}</span>}<span className="flex items-center justify-between mt-2 text-2xs text-ink-subtle"><span>{formatTimecode(c.ranges[0][0])} · {(editDuration(c) / 1000).toFixed(1)}s</span><span title={!reviewCurrent(c) ? 'Jev review out of date' : c.review?.decision === 'passes' ? 'Jev checks passed' : 'Jev: consider before baking'} className={cn('editor-dot', !reviewCurrent(c) ? 'bg-ink-subtle' : c.review?.decision === 'passes' ? 'bg-success' : 'bg-warning')} /></span>
           </button>)
           return group === 'discarded'
             ? <details key={group} className="editor-discarded" open={status === 'discarded' ? true : undefined}><summary>Discarded <span>{items.length}</span><ChevronDown size={12} /></summary>{cards}</details>
@@ -659,10 +676,10 @@ export function ClipEditor({ outputDir, leading, onExports }: { outputDir: strin
         <div ref={transcriptPanel} className="editor-inspector-body"><label className="editor-label" htmlFor="editor-title">Title</label><textarea id="editor-title" value={candidate.title} maxLength={200} disabled={editingDisabled} rows={2} onChange={(e) => { if (e.target.value.trim()) change({ title: e.target.value }) }} />
           {tab === 'review' && (localProvider
             ? <div className="mt-4 space-y-3">
-                <p className="text-xs font-medium text-success">Selected by local AI</p>
+                <p className={cn('text-xs font-medium', candidate.local_selection?.decision === 'selected' ? 'text-success' : 'text-warning')}>{localDecisionLabel(candidate)}</p>
                 <p className="text-2xs text-ink-subtle">Editorial ranking: {Math.round(candidate.score)}/100. This is not a confidence score.</p>
                 <p className="text-xs text-ink-muted">{candidate.reason || 'No selection rationale was provided.'}</p>
-                <p className="text-2xs text-ink-subtle">Adjust the cut, framing, and captions, then mark the clip ready when it looks right.</p>
+                <p className="text-2xs text-ink-subtle">Listen to the clip and review its ending. Adjust the cut, framing, and captions; approve it only if it is ready to export.</p>
               </div>
             : <div className="space-y-3 mt-4"><div className="flex items-center justify-between"><span className={cn('text-xs', current ? candidate.review?.decision === 'passes' ? 'text-success' : 'text-warning' : 'text-ink-muted')}>{!current ? 'Review out of date' : candidate.review?.decision === 'passes' ? 'Checks passed' : 'Consider before baking'}</span><Button size="sm" disabled={editingDisabled} onClick={() => { void run('review') }}>Review again</Button></div><p className="text-2xs text-ink-subtle">{current ? 'Review the questions, then adjust the cut and framing. You decide when the clip is ready.' : 'These results describe an earlier edit. Run Jev again to check your changes.'}</p>{candidate.review?.questions.map((q) => <Question key={q.id} q={q} />)}{!candidate.review && <p>No review is available yet. Run Jev to evaluate this candidate.</p>}{candidate.review?.cuts.map((cut, i) => <div key={i}><p className="editor-label">Removed {clock(cut.interval[0])} – {clock(cut.interval[1])}</p>{cut.questions.map((q) => <Question key={q.id} q={q} />)}</div>)}</div>)}
           {tab === 'framing' && <fieldset disabled={editingDisabled} className="space-y-4 mt-4"><div className="editor-layouts">{(['fill', 'split', 'fit'] as const).map((l) => <button key={l} className={cn(currentScene.layout === l && 'selected')} onClick={() => setLayout(l)}>{l === 'fill' ? 'Full frame' : l === 'split' ? 'Split' : 'Fit'}</button>)}</div>{currentScene.layout === 'split' && <div className="flex gap-2">{['Top', 'Bottom'].map((name, i) => <Button key={i} size="sm" variant={panel === i ? 'primary' : 'secondary'} onClick={() => setPanel(i)}>{name}</Button>)}</div>}{currentScene.layout !== 'fit' && <><label className="editor-label">Zoom<input aria-label="Crop zoom" type="range" min={1} max={4} step={.02} value={Math.min(4, defaultCrop(project.width, project.height, aspect * currentScene.crops.length)[2] / crop[2])} onChange={(e) => cropChange(defaultCrop(project.width, project.height, aspect * currentScene.crops.length, crop[0] + crop[2] / 2, crop[1] + crop[3] / 2, Number(e.target.value)))} /></label>{([0, 1] as const).map((axis) => <label key={axis} className="editor-label">{axis === 0 ? 'Horizontal' : 'Vertical'}<input type="range" aria-label={axis === 0 ? 'Horizontal crop position' : 'Vertical crop position'} min={0} max={Math.max(0, 1 - crop[axis + 2])} step={.001} value={crop[axis]} onChange={(e) => { const c = [...crop] as Crop; c[axis] = Number(e.target.value); cropChange(c) }} /></label>)}</>}{sceneIndex > 0 && <div className="editor-motion"><label className="flex items-center justify-between gap-2 text-xs"><span>Smooth movement</span><input type="checkbox" aria-label="Smooth movement" checked={!!currentScene.transition_ms} disabled={!canAnimate || editingDisabled} onChange={(e) => sceneChange({ transition_ms: e.target.checked ? 600 : undefined })} /></label>{canAnimate && currentScene.transition_ms ? <label className="editor-label mt-3">Duration <span className="float-right">{(currentScene.transition_ms / 1000).toFixed(1)}s</span><input aria-label="Movement duration" type="range" min={100} max={5000} step={100} value={currentScene.transition_ms} onChange={(e) => sceneChange({ transition_ms: Number(e.target.value) })} /></label> : !canAnimate ? <p className="text-2xs text-ink-subtle mt-2">Use the same layout as the previous section to animate its crops.</p> : null}{!!currentScene.transition_ms && <Button size="sm" variant="ghost" onClick={() => { seek(Math.max(start, currentScene.at_ms)); void video.current?.play() }}>Preview movement</Button>}</div>}<div className="space-y-2 border-t border-white/10 pt-3"><div className="editor-layout-time">

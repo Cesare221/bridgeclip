@@ -177,6 +177,52 @@ def test_selection_retries_one_malformed_response_and_keeps_only_closed_candidat
     assert all(url == "http://127.0.0.1:11434/api/chat" for url, _ in requests)
 
 
+def test_review_can_include_preliminary_candidates_without_changing_automatic_selection():
+    candidates = make_candidates()
+    evaluations = [
+        evaluation(0, closed=False, score=90, rationale="Preliminary."),
+        evaluation(2, closed=True, score=80, rationale="Closed narrative."),
+    ]
+
+    automatic_client, _ = fake_client([response_for(evaluations)])
+    automatic = LocalPlanningService(http_client=automatic_client)
+    selected = asyncio.run(select_and_close(automatic, candidates))
+
+    review_client, _ = fake_client([response_for(evaluations)])
+    review = LocalPlanningService(http_client=review_client)
+    preliminary = asyncio.run(
+        select_and_close(review, candidates, include_preliminary=True)
+    )
+
+    assert [candidate["id"] for candidate in selected] == [2]
+    assert [candidate["id"] for candidate in preliminary] == [0, 2]
+    assert [candidate["selection_decision"] for candidate in preliminary] == [
+        "narrative_not_closed",
+        "selected",
+    ]
+    assert all(candidate["structural_valid"] for candidate in preliminary)
+    assert [
+        candidate["decision"] for candidate in review.selection_diagnostics
+    ] == [
+        "narrative_not_closed",
+        "selected",
+    ]
+    assert all(
+        set(candidate)
+        == {
+            "id",
+            "start_time_ms",
+            "end_time_ms",
+            "duration_seconds",
+            "structural_valid",
+            "relevance_score",
+            "narrative_closed",
+            "decision",
+        }
+        for candidate in review.selection_diagnostics
+    )
+
+
 @pytest.mark.parametrize(
     "invalid_evaluations",
     [

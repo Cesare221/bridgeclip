@@ -38,6 +38,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--video", required=True, type=Path, help="Local source video to process")
     parser.add_argument("--output", type=Path, help="Output folder (defaults to a unique folder under TEMP)")
+    parser.add_argument(
+        "--workflow",
+        choices=("automatic", "review"),
+        default="automatic",
+        help="Run automatic selection or prepare candidates for Review & edit",
+    )
     args = parser.parse_args()
 
     video_path = args.video.expanduser().resolve(strict=True)
@@ -65,7 +71,7 @@ def main() -> int:
         "contract_version": 4,
         "job_id": run_id,
         "video_url": str(video_path),
-        "workflow": "automatic",
+        "workflow": args.workflow,
         "clipping_mode": "local",
         "max_clips": 2,
         "auto_clip_count": True,
@@ -161,6 +167,119 @@ def main() -> int:
         return 1
 
     output = result.get("output")
+    if args.workflow == "review":
+        if not isinstance(output, dict) or output.get("editor_project") is not True:
+            print("The local review run did not create an editor project.", file=sys.stderr)
+            return 1
+        project_path = output_root / run_id / "editor-project.json"
+        diagnostics_path = output_root / run_id / "selection_diagnostics.json"
+        try:
+            project = json.loads(project_path.read_text(encoding="utf-8"))
+            diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            print("The local review project or selection diagnostics are missing or invalid.", file=sys.stderr)
+            return 1
+        candidates = project.get("candidates") if isinstance(project, dict) else None
+        decisions = diagnostics.get("candidates") if isinstance(diagnostics, dict) else None
+        source_duration = output.get("source_video_duration_seconds")
+        if (
+            not isinstance(candidates, list)
+            or not candidates
+            or not isinstance(decisions, list)
+            or not isinstance(source_duration, (int, float))
+            or not source_duration > 0
+        ):
+            print("The local review project contains no validated candidates.", file=sys.stderr)
+            return 1
+        approved = [
+            item for item in decisions
+            if isinstance(item, dict) and item.get("decision") == "selected"
+        ]
+        for item in decisions:
+            if not isinstance(item, dict) or not isinstance(item.get("id"), int):
+                print("Local selection diagnostics contain an invalid candidate.", file=sys.stderr)
+                return 1
+            if (
+                set(item)
+                != {
+                    "id",
+                    "start_time_ms",
+                    "end_time_ms",
+                    "duration_seconds",
+                    "structural_valid",
+                    "relevance_score",
+                    "narrative_closed",
+                    "decision",
+                }
+                or item.get("structural_valid") is not True
+                or type(item.get("narrative_closed")) is not bool
+                or type(item.get("relevance_score")) is not int
+                or item.get("decision") not in {
+                    "selected",
+                    "narrative_not_closed",
+                    "overlaps_selected_candidate",
+                    "selection_limit",
+                }
+            ):
+                print("Local selection diagnostics contain an unsafe or invalid record.", file=sys.stderr)
+                return 1
+            print(
+                f"[candidate] id={item['id']} decision={item['decision']} "
+                f"narrative_closed={str(item['narrative_closed']).lower()} "
+                f"score={item['relevance_score']}"
+            )
+        for index, left in enumerate(approved):
+            for right in approved[index + 1:]:
+                if left["start_time_ms"] < right["end_time_ms"] and right["start_time_ms"] < left["end_time_ms"]:
+                    print("Approved local candidate intervals overlap.", file=sys.stderr)
+                    return 1
+        preliminary_count = 0
+        for item in candidates:
+            local_selection = item.get("local_selection")
+            ranges = item.get("ranges")
+            if (
+                not isinstance(local_selection, dict)
+                or not isinstance(ranges, list)
+                or not ranges
+                or item.get("status") != "refining"
+                or item.get("exports") != []
+            ):
+                print("The local review project has an invalid candidate.", file=sys.stderr)
+                return 1
+            duration_ms = 0
+            for interval in ranges:
+                if (
+                    not isinstance(interval, list)
+                    or len(interval) != 2
+                    or type(interval[0]) is not int
+                    or type(interval[1]) is not int
+                ):
+                    print("The local review project has an invalid time range.", file=sys.stderr)
+                    return 1
+                start, end = interval
+                duration_ms += end - start
+                if start < 0 or end > source_duration * 1000 or end <= start:
+                    print("A local review candidate is outside source bounds.", file=sys.stderr)
+                    return 1
+            if not 30_000 <= duration_ms <= 60_000:
+                print("A local review candidate is outside the 30–60 second duration range.", file=sys.stderr)
+                return 1
+            if local_selection.get("decision") != "selected":
+                preliminary_count += 1
+        if not preliminary_count:
+            print("The review project contains no preliminary candidates.", file=sys.stderr)
+            return 1
+        if output.get("clips") != []:
+            print("Review preparation unexpectedly exported a clip.", file=sys.stderr)
+            return 1
+        print(
+            f"Local Review E2E passed. {len(candidates)} candidates are available; "
+            f"{preliminary_count} require human review. No clip was exported."
+        )
+        print(f"Review project: {project_path}")
+        print(f"Safe candidate diagnostics: {diagnostics_path}")
+        return 0
+
     clips = output.get("clips") if isinstance(output, dict) else None
     if not isinstance(clips, list) or not clips:
         print("The local run completed, but selected no complete 30–60 second clips.")

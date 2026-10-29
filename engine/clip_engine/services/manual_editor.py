@@ -240,6 +240,20 @@ async def prepare_project(
             ), 'captions': request.include_captions,
             'caption_preset': request.caption_preset, 'video_speed': request.video_speed, 'exports': [], 'review': None,
             'status': 'refining', 'caption_edits': [], 'caption_suppression_ranges': []}
+        if provider == 'local':
+            decision = selection.get('selection_decision', 'selected')
+            narrative_closed = selection.get('narrative_closed', True)
+            if decision not in (
+                'selected',
+                'narrative_not_closed',
+                'overlaps_selected_candidate',
+                'selection_limit',
+            ) or type(narrative_closed) is not bool:
+                raise ValueError('Invalid local selection decision')
+            c['local_selection'] = {
+                'decision': decision,
+                'narrative_closed': narrative_closed,
+            }
         if plan is not None and getattr(plan, 'camera_scan', None):
             c['camera_scan'] = plan.camera_scan
             c['dismissed_camera_markers'] = []
@@ -531,6 +545,32 @@ async def run_editor(config, progress=None):
         if any(edit['segment'] >= len(transcript) for edit in c.get('caption_edits', [])):
             raise EditorError('invalid_edit', 'Caption source changed')
         output = read_json(run, 'job_output.json')
+        if project.get('provider') == 'local':
+            duration_ms = sum(end - start for start, end in c['ranges'])
+            if not 30_000 <= duration_ms <= 60_000:
+                raise EditorError(
+                    'invalid_edit',
+                    'Local clips must remain between 30 and 60 seconds.',
+                )
+            clip_start = c['ranges'][0][0]
+            clip_end = c['ranges'][-1][1]
+            for existing in output['clips']:
+                if existing.get('editor_candidate') == c['id']:
+                    continue
+                existing_start = existing.get('start_time_ms')
+                existing_end = existing.get('end_time_ms')
+                if (
+                    type(existing_start) is not int
+                    or type(existing_end) is not int
+                    or existing_start < 0
+                    or existing_end <= existing_start
+                ):
+                    raise EditorError('invalid_edit', 'An existing local export has invalid source bounds.')
+                if clip_start < existing_end and existing_start < clip_end:
+                    raise EditorError(
+                        'invalid_edit',
+                        'Local clips cannot overlap an existing export.',
+                    )
         # job_output.json is committed before editor-project.json. If the worker
         # was killed in between, this exact edit (same revision) is already in
         # the library: finish that commit instead of rendering a duplicate.
