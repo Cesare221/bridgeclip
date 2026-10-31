@@ -1,11 +1,34 @@
-import { useEffect, useRef, useState, type RefObject } from 'react'
+import { useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import type { CandidateEdit, EditorProject } from '../../shared/clip-editor'
-import { captionAnchor } from '../lib/caption-preview'
+import { captionAnchor, captionPreviewAt, captionPreviewTimeline, type CaptionPreviewLine } from '../lib/caption-preview'
 import { captionPreviewPreset, textShadow } from './CaptionPresetPicker'
 
 // Preset sizes in the export's 1080×1920 coordinate system. Browser font metrics
-// differ from libass; this is a placement guide, not a pixel-exact render.
+// differ from libass; this is a preview, not a pixel-exact render.
 const SIZES: Record<string, number> = { pop: 84, spotlight: 80, impact: 124, glow: 80, boxed: 70, sweep: 76, editorial: 112, hype: 88, punch: 150, neon: 78, headline: 72, paper: 68, subtle: 70 }
+
+export function CaptionPreviewWords({ line, presetId, shadow, size }: {
+  line: CaptionPreviewLine; presetId: string; shadow: string; size: number
+}): React.JSX.Element {
+  const preset = captionPreviewPreset(presetId)
+  return <span className="editor-caption-words" style={{ background: preset.plate }}>
+    {line.words.map((word, i) => {
+      const active = word.state === 'active'
+      const future = word.state === 'future'
+      const color = active ? preset.highlight : preset.karaoke && word.state === 'past' ? preset.highlight : preset.primary
+      return <span key={`${i}-${word.text}`} data-caption-word={word.state}
+        style={{ color, background: active ? preset.pill : undefined,
+          padding: active && preset.pill ? '0 .15em' : undefined,
+          borderRadius: '.15em',
+          opacity: future && preset.future === 'dim' ? preset.dimOpacity ?? .6 : undefined,
+          visibility: future && preset.future === 'hide' ? 'hidden' : undefined,
+          textShadow: active ? preset.pill ? 'none' :
+            preset.glow ? `${shadow}, 0 0 ${size / 3}px ${preset.glow}` : shadow : shadow }}>
+        {word.text}
+      </span>
+    })}
+  </span>
+}
 
 export function EditorCaptionPreview({ canvas, project, candidate, time, disabled, onMove, onDrag }: {
   canvas: RefObject<HTMLCanvasElement | null>; project: EditorProject; candidate: CandidateEdit; time: number
@@ -31,7 +54,10 @@ export function EditorCaptionPreview({ canvas, project, candidate, time, disable
   const scale = bounds.width / (landscape ? 1920 : 1080)
   const size = (SIZES[preset.id] ?? 84) * (landscape ? .65 : 1) * scale * .8
   const shadow = textShadow(preset, scale * 3)
-  if (!candidate.captions || !bounds.width) return null
+  const timeline = useMemo(() => captionPreviewTimeline(project, candidate, preset.maxWords ?? 3),
+    [project, candidate, preset.maxWords])
+  const line = captionPreviewAt(timeline, time)
+  if (!line || !bounds.width) return null
   return <div className="editor-caption-overlay" style={bounds}>
     <button type="button" aria-label="Subtitle position" title="Drag up or down to position subtitles. Arrow keys move them; Shift moves farther."
       className="editor-caption-preview" disabled={disabled}
@@ -59,12 +85,7 @@ export function EditorCaptionPreview({ canvas, project, candidate, time, disable
         const center = anchor.y - (anchor.bottom ? e.currentTarget.getBoundingClientRect().height / bounds.height / 2 : 0)
         onMove(Math.max(.1, Math.min(.9, center + direction * (e.shiftKey ? .05 : .01))), true)
       }}>
-      <span className="editor-caption-words" style={{ background: preset.plate }}>
-        {['Captions', 'go', 'here'].map((word, i) => <span key={i} style={{ color: i === 1 ? preset.highlight : preset.primary,
-          background: i === 1 ? preset.pill : undefined,
-          padding: preset.pill ? '0 .15em' : undefined, borderRadius: '.15em',
-          textShadow: i === 1 && preset.glow ? `${shadow}, 0 0 ${size / 3}px ${preset.glow}` : undefined }}>{word}</span>)}
-      </span>
+      <CaptionPreviewWords line={line} presetId={preset.id} shadow={shadow} size={size} />
     </button>
   </div>
 }

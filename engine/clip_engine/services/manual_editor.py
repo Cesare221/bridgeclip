@@ -176,10 +176,22 @@ async def prepare_project(
     w, h = await renderer._get_video_dimensions(download.video_path)
     duration = round(download.metadata.duration_seconds * 1000)
     aspect = 9 / 16 if request.aspect_ratio == '9:16' else 16 / 9
+    def editor_transcript_segment(segment):
+        row = {'start_ms': max(0, min(duration, segment.start_time_ms)),
+            'end_ms': max(0, min(duration, segment.end_time_ms)),
+            'text': utf16_prefix(segment.text, 20000)}
+        words = []
+        for word in segment.words:
+            start = max(0, min(duration, word.start_time_ms))
+            end = max(0, min(duration, word.end_time_ms))
+            if end > start:
+                words.append({'text': utf16_prefix(word.word, 2000), 'start_ms': start, 'end_ms': end})
+        if words:
+            row['words'] = words
+        return row
     project = {'version': 1, 'revision': 0, 'title': utf16_prefix(download.metadata.title or '', 1024), 'width': w, 'height': h,
         'duration_ms': duration, 'aspect_ratio': request.aspect_ratio, 'candidates': [],
-        'transcript': [{'start_ms': max(0, min(duration, s.start_time_ms)), 'end_ms': max(0, min(duration, s.end_time_ms)),
-                        'text': utf16_prefix(s.text, 20000)} for s in transcript]}
+        'transcript': [editor_transcript_segment(s) for s in transcript]}
     if provider == 'local':
         project['provider'] = 'local'
     loop = asyncio.get_running_loop()

@@ -63,6 +63,9 @@ def test_prepare_retains_rejected_candidates_and_does_not_render(tmp_path):
     project = asyncio.run(prepare_project(request, segments, transcript(), SimpleNamespace(video_path=str(source),
         metadata=SimpleNamespace(title='Original', duration_seconds=12)), renderer, gate, str(out), lambda *_: None))
     assert len(project['candidates']) == 2
+    assert project['transcript'][0]['words'] == [
+        {'text': 'Here is the setup.', 'start_ms': 0, 'end_ms': 2000}
+    ]
     assert all(c['status'] == 'refining' and c['caption_edits'] == [] for c in project['candidates'])
     assert all(c['review']['decision'] == 'needs_attention' for c in project['candidates'])
     assert project['candidates'][0]['ranges'] == [[0, 5000]]

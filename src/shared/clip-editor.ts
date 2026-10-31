@@ -13,6 +13,12 @@ export interface EditorScene {
   /** Incoming eased movement, in source milliseconds. Absent/zero is a cut. */
   transition_ms?: number
 }
+export interface EditorTranscriptWord {
+  text: string; start_ms: number; end_ms: number
+}
+export interface EditorTranscriptSegment {
+  start_ms: number; end_ms: number; text: string; words?: EditorTranscriptWord[]
+}
 export interface EditorQuestion {
   id: string; prompt: string; yes: string; no: string; probability: number | null; threshold: number; status: string
 }
@@ -53,7 +59,7 @@ export interface EditorProject {
   /** Source and preview were deleted to save space; the project is read-only. */
   media_freed?: boolean
   aspect_ratio: '9:16' | '16:9'; candidates: EditorCandidate[]
-  transcript: { start_ms: number; end_ms: number; text: string }[]
+  transcript: EditorTranscriptSegment[]
 }
 export interface EditorProgress { phase: 'scan' | 'preview'; percent: number }
 export type EditorOperation = 'save' | 'review' | 'export' | 'export-all' | 'replace-source' | 'scan-cameras'
@@ -206,7 +212,20 @@ export function parseEditorProject(value: unknown): EditorProject {
   if (v.version !== 1 || !['9:16', '16:9'].includes(v.aspect_ratio as string)) fail()
   if (v.provider !== undefined && v.provider !== 'local') fail()
   const duration = num(v.duration_ms, 100, 24 * 3600000)
-  const transcript = arr(v.transcript, 100000).map((row) => { const t = record(row); return { start_ms: num(t.start_ms, 0, duration), end_ms: num(t.end_ms, 0, duration), text: clampText(t.text, 20000) } })
+  let transcriptWordCount = 0
+  const transcript = arr(v.transcript, 100000).map((row): EditorTranscriptSegment => {
+    const t = record(row), start_ms = num(t.start_ms, 0, duration), end_ms = num(t.end_ms, start_ms, duration)
+    if (t.words === undefined) return { start_ms, end_ms, text: clampText(t.text, 20000) }
+    const words = arr(t.words, 10000).map((value): EditorTranscriptWord => {
+      const word = record(value), wordStart = num(word.start_ms, 0, duration), wordEnd = num(word.end_ms, wordStart, duration)
+      if (wordEnd <= wordStart) fail()
+      transcriptWordCount += 1
+      if (transcriptWordCount > 1_000_000) fail()
+      return { text: clampText(word.text, 2000), start_ms: wordStart, end_ms: wordEnd }
+    })
+    if (words.some((word, i) => i > 0 && word.start_ms < words[i - 1].start_ms)) fail()
+    return { start_ms, end_ms, text: clampText(t.text, 20000), words }
+  })
   const ids = new Set<string>()
   const candidates = arr(v.candidates, 100).map((item): EditorCandidate => {
     const c = record(item), edit = parseCandidateEdit(c, duration, transcript.length)
