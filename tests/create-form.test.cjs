@@ -7,7 +7,7 @@ const { renderToStaticMarkup } = require('react-dom/server')
 
 const bundled = buildSync({
   stdin: {
-    contents: `export { FormatStep, ClipsStep, CaptionsStep, JobForm, buildJobRequest, parseTrimRange } from './src/renderer/components/JobForm';
+    contents: `export { FormatStep, ClippingModePicker, ClipsStep, CaptionsStep, JobForm, buildJobRequest, parseTrimRange } from './src/renderer/components/JobForm';
       export { JobProgress } from './src/renderer/components/JobProgress';
       export { SetupCard } from './src/renderer/components/SetupCard';
       export { useSettingsStore, requiredToolsAvailable } from './src/renderer/store/use-settings-store';
@@ -78,8 +78,12 @@ test('the wizard opens on the video step with the steps listed in order', () => 
   assert.ok(order.every((index, i) => index > -1 && (i === 0 || index > order[i - 1])))
   assert.match(html, /aria-current="step"[^>]*>.*?Video/s)
   assert.match(html, /Choose a video/)
+  // The clipping mode is chosen before the wizard, so Local is available on Video.
+  assert.ok(html.indexOf('aria-label="Clipping mode"') > -1)
+  assert.ok(html.indexOf('aria-label="Clipping mode"') < html.indexOf('aria-label="Create steps"'))
   assert.equal(form.exports.useDraftStore.getState().workflow, null)
-  const radios = html.match(/<button[^>]*role="radio"[^>]*>/g) ?? []
+  const workflowHtml = html.slice(html.indexOf('aria-label="Workflow"'))
+  const radios = workflowHtml.match(/<button[^>]*role="radio"[^>]*>/g) ?? []
   assert.equal(radios.length, 2)
   assert.ok(radios.every((radio) => radio.includes('aria-checked="false"')))
   assert.equal(radios.filter((radio) => radio.includes('tabindex="0"')).length, 1)
@@ -113,7 +117,7 @@ test('clipping mode is selectable and economy disables paid vision in the submit
     layoutVision: true, pacing: 'tight', durations: ['short'], autoClipCount: true, maxClips: 5,
     includeCaptions: true, captionPreset: 'pop'
   }
-  const html = renderToStaticMarkup(React.createElement(ClipsStep, { draft, update() {} }))
+  const html = renderToStaticMarkup(React.createElement(form.exports.ClippingModePicker, { draft, update() {} }))
   assert.match(html, /aria-label="Clipping mode"/)
   assert.match(html, /Economy/)
   const request = buildJobRequest(draft, { start: null, end: null })
@@ -130,11 +134,11 @@ test('local mode is offline-only, vertical, keyless, and capped at two candidate
     layoutStyle: 'auto', layoutVision: true, pacing: 'tight', durations: ['short'], autoClipCount: false,
     maxClips: 8, includeCaptions: true, captionPreset: 'pop'
   }
-  const html = renderToStaticMarkup(React.createElement(ClipsStep, { draft, update() {} }))
+  const html = renderToStaticMarkup(React.createElement(form.exports.ClippingModePicker, { draft, update() {} }))
   const request = buildJobRequest(draft, { start: null, end: null })
   assert.match(html, /Faster-Whisper \+ Ollama/)
   assert.match(html, /zero, one, or two complete non-overlapping clips/)
-  assert.match(html, /aria-label="Maximum clips"[^>]*value="2"/)
+  assert.match(renderToStaticMarkup(React.createElement(ClipsStep, { draft, update() {} })), /aria-label="Maximum clips"[^>]*value="2"/)
   assert.equal(request.clippingMode, 'local')
   assert.equal(request.videoUrl, draft.source)
   assert.equal(request.aspectRatio, '9:16')
@@ -275,7 +279,7 @@ test('advanced selections travel with the job while presets ignore retained cust
     aspectRatio: '9:16', layoutStyle: 'auto', layoutVision: true, pacing: 'tight',
     durations: ['short'], autoClipCount: true, maxClips: 5, includeCaptions: true, captionPreset: 'pop'
   }
-  const html = renderToStaticMarkup(React.createElement(ClipsStep, { draft, update() {} }))
+  const html = renderToStaticMarkup(React.createElement(form.exports.ClippingModePicker, { draft, update() {} }))
   assert.match(html, /Clip planning model/)
   assert.match(html, /Transcription model/)
   assert.equal((html.match(/role="combobox"/g) ?? []).length, 2)
@@ -342,7 +346,7 @@ test('Twitch VOD links canonicalize while other Twitch pages are rejected', () =
 
 
 test('Review & edit shows required Jev review even when automatic review is off', () => {
-  const { ClipsStep, useDraftStore, useSettingsStore } = form.exports
+  const { useDraftStore, useSettingsStore } = form.exports
   const original = useSettingsStore.getState()
   const initialState = useSettingsStore.getInitialState()
   const initialJev = initialState.jevEnabled
@@ -350,8 +354,8 @@ test('Review & edit shows required Jev review even when automatic review is off'
     useSettingsStore.setState({ jevEnabled: 'off' })
     initialState.jevEnabled = 'off'
     const draft = useDraftStore.getState()
-    const review = renderToStaticMarkup(React.createElement(ClipsStep, { draft: { ...draft, workflow: 'review' }, update() {} }))
-    const automatic = renderToStaticMarkup(React.createElement(ClipsStep, { draft: { ...draft, workflow: 'automatic' }, update() {} }))
+    const review = renderToStaticMarkup(React.createElement(form.exports.ClippingModePicker, { draft: { ...draft, workflow: 'review' }, update() {} }))
+    const automatic = renderToStaticMarkup(React.createElement(form.exports.ClippingModePicker, { draft: { ...draft, workflow: 'automatic' }, update() {} }))
     assert.match(review, /Jev review required/)
     assert.doesNotMatch(review, /Jev review &amp; repairs off/)
     assert.match(automatic, /Jev review &amp; repairs off/)

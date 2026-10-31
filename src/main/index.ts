@@ -16,6 +16,7 @@ import { cancelZernioConnect } from './zernio/service'
 import { isAutomationMedia, startAutomationScheduler } from './automations'
 import { sweepDeletingRuns } from './library-management'
 import { registerAssistant, type AssistantRuntime } from './assistant/ipc'
+import { prepareSessionCache } from './session-cache'
 
 // Catch crashes anywhere in the main process so we get a log line instead
 // of a silent exit. Without these, an unhandled rejection in an IPC handler
@@ -63,6 +64,10 @@ const gotTheLock = app.requestSingleInstanceLock()
 if (!gotTheLock) {
   app.quit()
 } else {
+  const cache = prepareSessionCache(app.getPath('userData'), app.getPath('temp'), app.isPackaged)
+  app.setPath('sessionData', cache.directory)
+  app.commandLine.appendSwitch('disk-cache-dir', join(cache.directory, 'Cache'))
+  logger.info('app.sessionCache', { writable: true, fallback: cache.fallback, packaged: app.isPackaged })
   app.on('second-instance', () => {
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore()
@@ -190,6 +195,7 @@ protocol.registerSchemesAsPrivileged([
 ])
 
 app.whenReady().then(() => {
+  if (!gotTheLock) return
   cleanStaleWorkspaces()
   electronApp.setAppUserModelId('com.bridgemind.bridgeclip')
   if (hiddenForTests) app.dock?.hide()

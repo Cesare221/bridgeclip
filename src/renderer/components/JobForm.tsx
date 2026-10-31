@@ -150,6 +150,7 @@ export function JobForm({ onSubmit, onViewJob, blockedReason, submitting, classN
 
   return (
     <div className={cn('space-y-3', className)}>
+      <Panel className="p-4 xl:p-5"><ClippingModePicker draft={draft} update={update} showModels={step === 'clips'} /></Panel>
       <Stepper current={step} reachable={videoValid ? WIZARD_STEPS.length - 1 : 0} onSelect={goTo} />
 
       {step === 'captions' && draft.workflow === 'review' && (
@@ -417,8 +418,45 @@ export function FormatStep({ draft, update }: { draft: ClipDraft; update: Update
   )
 }
 
-export function ClipsStep({ draft, update }: { draft: ClipDraft; update: Update }): React.JSX.Element {
+export function ClippingModePicker({ draft, update, showModels = true }: { draft: ClipDraft; update: Update; showModels?: boolean }): React.JSX.Element {
   const jevEnabled = useSettingsStore((s) => s.jevEnabled === 'on')
+  return (
+    <Group label="Clipping mode">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4" role="radiogroup" aria-label="Clipping mode">
+        {([
+          { id: 'local', label: 'Local', hint: 'Faster-Whisper + Ollama · no API cost · up to 2 clips' },
+          { id: 'quality', label: 'Quality', hint: `GPT-6 Sol planning · ${draft.workflow === 'review' ? 'Jev review required' : `Jev review & repairs ${jevEnabled ? 'enabled' : 'off'}`} · MAI Transcribe 2` },
+          { id: 'economy', label: 'Economy', hint: 'GLM 5.3 Flash planning · Whisper Turbo' },
+          { id: 'advanced', label: 'Advanced', hint: 'Choose your OpenRouter models' }
+        ] as const).map((mode) => {
+          const selected = draft.clippingMode === mode.id
+          return <button key={mode.id} type="button" role="radio" aria-checked={selected} tabIndex={selected ? 0 : -1}
+            onKeyDown={onRadioKeyDown} onClick={() => update({
+              clippingMode: mode.id,
+              ...(mode.id === 'local' ? {
+                source: isUrl(draft.source) ? '' : draft.source,
+                aspectRatio: '9:16',
+                layoutVision: false,
+                maxClips: Math.min(2, draft.maxClips)
+              } : {})
+            })}
+            className={cn('glass-tile glass-tile-hover rounded-xl px-3 py-2.5 text-left', selected && 'glass-selected')}>
+            <span className="block text-sm font-medium text-ink">{mode.label}</span>
+            <span className="block text-2xs text-ink-subtle">{mode.hint}</span>
+          </button>
+        })}
+      </div>
+      {showModels && draft.clippingMode === 'advanced' ? <AdvancedModels draft={draft} update={update} /> :
+        draft.clippingMode === 'advanced'
+          ? <p className="mt-2 text-2xs text-ink-subtle">Choose the OpenRouter models on the Clips step.</p>
+          : draft.clippingMode === 'local'
+            ? <p className="mt-2 text-2xs text-ink-subtle">Runs on this computer with the cached Faster-Whisper Base model and Ollama qwen3:1.7b. Requires Ollama to be running with that model installed. Only local 9:16 videos are accepted; zero, one, or two complete non-overlapping clips may be selected.</p>
+            : <p className="mt-2 text-2xs text-ink-subtle">Economy uses lower-cost models and skips paid vision checks. Transcription retries temporary errors and can fall back to Whisper Large V3, then MAI Transcribe 2. Clip choices and captions may be less accurate.</p>}
+    </Group>
+  )
+}
+
+export function ClipsStep({ draft, update }: { draft: ClipDraft; update: Update }): React.JSX.Element {
   const clipLimit = draft.clippingMode === 'local' ? 2 : MAX_CLIPS
   const selectedClipLimit = Math.min(clipLimit, draft.maxClips)
   const toggleDuration = (id: string): void => {
@@ -437,36 +475,6 @@ export function ClipsStep({ draft, update }: { draft: ClipDraft; update: Update 
           placeholder="e.g. every time they talk about pricing, or the funniest reactions"
         />
         <p id="clip-request-help" className="mt-2 text-2xs text-ink-subtle">Only matching moments are clipped, so you may get fewer clips, or none. Leave blank for the best moments.</p>
-      </Group>
-      <Group label="Clipping mode">
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4" role="radiogroup" aria-label="Clipping mode">
-          {([
-            { id: 'quality', label: 'Quality', hint: `GPT-6 Sol planning · ${draft.workflow === 'review' ? 'Jev review required' : `Jev review & repairs ${jevEnabled ? 'enabled' : 'off'}`} · MAI Transcribe 2` },
-            { id: 'economy', label: 'Economy', hint: 'GLM 5.3 Flash planning · Whisper Turbo' },
-            { id: 'advanced', label: 'Advanced', hint: 'Choose your OpenRouter models' },
-            { id: 'local', label: 'Local', hint: 'Faster-Whisper + Ollama · no API cost · up to 2 clips' }
-          ] as const).map((mode) => {
-            const selected = draft.clippingMode === mode.id
-            return <button key={mode.id} type="button" role="radio" aria-checked={selected} tabIndex={selected ? 0 : -1}
-              onKeyDown={onRadioKeyDown} onClick={() => update({
-                clippingMode: mode.id,
-                ...(mode.id === 'local' ? {
-                  source: isUrl(draft.source) ? '' : draft.source,
-                  aspectRatio: '9:16',
-                  layoutVision: false,
-                  maxClips: Math.min(2, draft.maxClips)
-                } : {})
-              })}
-              className={cn('glass-tile glass-tile-hover rounded-xl px-3 py-2.5 text-left', selected && 'glass-selected')}>
-              <span className="block text-sm font-medium text-ink">{mode.label}</span>
-              <span className="block text-2xs text-ink-subtle">{mode.hint}</span>
-            </button>
-          })}
-        </div>
-        {draft.clippingMode === 'advanced' ? <AdvancedModels draft={draft} update={update} /> :
-          draft.clippingMode === 'local'
-            ? <p className="mt-2 text-2xs text-ink-subtle">Runs on this computer with the cached Faster-Whisper Base model and Ollama qwen3:1.7b. Requires Ollama to be running with that model installed. Only local 9:16 videos are accepted; zero, one, or two complete non-overlapping clips may be selected.</p>
-            : <p className="mt-2 text-2xs text-ink-subtle">Economy uses lower-cost models and skips paid vision checks. Transcription retries temporary errors and can fall back to Whisper Large V3, then MAI Transcribe 2. Clip choices and captions may be less accurate.</p>}
       </Group>
       <Group label="Clip length" aside={draft.durations.length === 0 ? 'Any length' : `${draft.durations.length} selected`}>
         <div className="grid grid-cols-4 gap-1.5 sm:grid-cols-7" role="group" aria-label="Clip length options">

@@ -26,8 +26,8 @@ FFmpeg and FFprobe must be available to BridgeClip, and the FFmpeg build must in
 
 ## Create and export
 
-1. In **Create**, select **Automatic** or **Review & edit**.
-2. Select **Local** under **Clipping mode**.
+1. In **Create**, select **Local** under **Clipping mode**, above the wizard steps.
+2. Select **Automatic** or **Review & edit**.
 3. Use the native picker to select a video on this computer. Remote links are unavailable in Local mode.
 4. Choose caption and duration options, then start the job. Local output is always vertical 9:16; no more than two non-overlapping candidates are selected. The default length is 30–60 seconds. The result can contain zero, one, or two clips.
 5. Automatic exports are saved under the configured output folder. Review & edit opens the local candidates, their editorial score and selection rationale; adjust cut ranges, framing, and captions in the existing editor, then mark the clip ready and export.
