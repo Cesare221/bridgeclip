@@ -24,11 +24,12 @@ OLLAMA_MODEL = "qwen3:1.7b"
 OLLAMA_TIMEOUT_SECONDS = 300.0
 MAX_CANDIDATES_FOR_OLLAMA = 12
 MAX_SELECTED_CLIPS = 2
+MAX_EXPANSIONS_PER_CANDIDATE = 4
+MAX_EXPANSIONS_FOR_OLLAMA = 12
 MIN_CANDIDATE_WORDS = 40
 TARGET_CANDIDATE_DURATION_SECONDS = 45
 CONTEXT_AFTER_END_MS = 15_000
 MAX_CONTEXT_WORDS = 50
-MAX_PROMPT_TRANSCRIPT_CHARS = 1100
 MAX_PROMPT_CONTEXT_CHARS = 500
 
 _SENTENCE_END = re.compile(r'[.!?…]["”’)\]]*$')
@@ -149,6 +150,9 @@ def generate_candidates(
                 "duration_seconds": round(duration_ms / 1000, 2),
                 "transcript": " ".join(word.text for word in selected_words),
                 "context_after": _context_after(words, end_index, end_ms),
+                "context_before": " ".join(
+                    word.text for word in words[max(0, start_index - MAX_CONTEXT_WORDS):start_index]
+                ),
             })
 
     return candidates
@@ -236,6 +240,32 @@ def _intervals_overlap(left: dict[str, Any], right: dict[str, Any]) -> bool:
         left["start_time_ms"] < right["end_time_ms"]
         and right["start_time_ms"] < left["end_time_ms"]
     )
+
+
+def expansion_variants(original: dict[str, Any], candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Reuse sentence-bounded intervals containing the entire original idea."""
+    variants = sorted(
+        (candidate for candidate in candidates
+         if candidate["start_time_ms"] <= original["start_time_ms"]
+         and candidate["end_time_ms"] >= original["end_time_ms"]
+         and (candidate["start_time_ms"], candidate["end_time_ms"])
+         != (original["start_time_ms"], original["end_time_ms"])),
+        key=lambda candidate: (candidate["duration_seconds"], candidate["id"]),
+    )
+    # Cover both directions before spending the remaining budget on nearby endings.
+    chosen = []
+    for before, after in ((False, True), (True, False), (True, True)):
+        match = next((candidate for candidate in variants
+                      if (candidate["start_time_ms"] < original["start_time_ms"]) == before
+                      and (candidate["end_time_ms"] > original["end_time_ms"]) == after), None)
+        if match is not None:
+            chosen.append(match)
+    for candidate in variants:
+        if len(chosen) >= MAX_EXPANSIONS_PER_CANDIDATE:
+            break
+        if candidate not in chosen:
+            chosen.append(candidate)
+    return chosen
 
 
 class LocalPlanningService:
@@ -352,6 +382,7 @@ class LocalPlanningService:
                     "structural_valid": True,
                     "relevance_score": candidate["relevance_score"],
                     "rationale": candidate["rationale"],
+                    **({"expansion": candidate["expansion"]} if "expansion" in candidate else {}),
                 },
             )
             for candidate in selected
@@ -415,6 +446,53 @@ class LocalPlanningService:
             }
             for candidate in shortlist
         ]
+        evaluated = {candidate["id"]: candidate for candidate in candidates_with_evaluations}
+        families = {}
+        pending = {}
+        for original in sorted(candidates_with_evaluations, key=lambda item: -item["relevance_score"]):
+            if original["narrative_closed"] or original["relevance_score"] == 0:
+                continue
+            variants = expansion_variants(original, validated)
+            family = []
+            for variant in variants:
+                candidate_id = variant["id"]
+                if candidate_id not in evaluated and candidate_id not in pending:
+                    if len(pending) >= MAX_EXPANSIONS_FOR_OLLAMA:
+                        continue
+                    pending[candidate_id] = variant
+                family.append(candidate_id)
+            families[original["id"]] = family
+        if pending:
+            self._progress(f"Evaluating {len(pending)} narrative expansions with Ollama...")
+            expanded_evaluations = await self._evaluate_candidates(list(pending.values()), clip_request)
+            evaluated.update({
+                candidate_id: {**variant, **expanded_evaluations[candidate_id], "structural_valid": True}
+                for candidate_id, variant in pending.items()
+            })
+        improved = {}
+        for original in candidates_with_evaluations:
+            family = [original] + [evaluated[candidate_id] for candidate_id in families.get(original["id"], [])]
+            complete = [candidate for candidate in family if candidate["narrative_closed"]]
+            if complete:
+                best = min(complete, key=lambda item: (
+                    item["duration_seconds"], -item["relevance_score"], item["id"],
+                ))
+            else:
+                best = min(family, key=lambda item: (
+                    -item["relevance_score"], item["duration_seconds"], item["id"],
+                ))
+            best = dict(best)
+            if best["id"] != original["id"]:
+                best["expansion"] = {
+                    "original_start_time_ms": original["start_time_ms"],
+                    "original_end_time_ms": original["end_time_ms"],
+                    "suggested_start_time_ms": best["start_time_ms"],
+                    "suggested_end_time_ms": best["end_time_ms"],
+                    "reason": original["rationale"],
+                    "narrative_closed": best["narrative_closed"],
+                }
+            improved.setdefault(best["id"], best)
+        candidates_with_evaluations = list(improved.values())
         selected = select_non_overlapping_candidates(candidates_with_evaluations, max_clips)
         selected_ids = {candidate["id"] for candidate in selected}
         for candidate in candidates_with_evaluations:
@@ -440,12 +518,19 @@ class LocalPlanningService:
                 "relevance_score": candidate["relevance_score"],
                 "narrative_closed": candidate["narrative_closed"],
                 "decision": candidate["selection_decision"],
+                **({"expansion": candidate["expansion"]} if "expansion" in candidate else {}),
             }
             for candidate in candidates_with_evaluations
         ]
         if include_preliminary:
+            review = list(selected)
+            for candidate in sorted(candidates_with_evaluations, key=lambda item: -item["relevance_score"]):
+                if len(review) >= min(max_clips, MAX_SELECTED_CLIPS):
+                    break
+                if not any(_intervals_overlap(candidate, chosen) for chosen in review):
+                    review.append(candidate)
             return sorted(
-                candidates_with_evaluations,
+                review,
                 key=lambda candidate: (
                     candidate["start_time_ms"],
                     candidate["end_time_ms"],
@@ -468,6 +553,12 @@ class LocalPlanningService:
         candidates: list[dict[str, Any]],
         clip_request: Optional[str],
     ) -> dict[int, dict[str, Any]]:
+        # Keep full endings visible while bounding each local model context.
+        if len(candidates) > 3:
+            evaluations = {}
+            for index in range(0, len(candidates), 3):
+                evaluations.update(await self._evaluate_candidates(candidates[index:index + 3], clip_request))
+            return evaluations
         candidate_ids = [candidate["id"] for candidate in candidates]
         payload = _build_ollama_payload(candidates, clip_request)
         for attempt in range(2):
@@ -533,7 +624,8 @@ def _build_ollama_payload(
             {
                 "id": candidate["id"],
                 "duration_seconds": candidate["duration_seconds"],
-                "transcript": candidate["transcript"][:MAX_PROMPT_TRANSCRIPT_CHARS],
+                "transcript": candidate["transcript"],
+                "context_before": candidate.get("context_before", "")[-MAX_PROMPT_CONTEXT_CHARS:],
                 "context_after": candidate["context_after"][:MAX_PROMPT_CONTEXT_CHARS],
             }
             for candidate in candidates
@@ -555,7 +647,10 @@ def _build_ollama_payload(
                 "content": (
                     "You are a professional editor selecting self-contained short-form video moments. "
                     "Evaluate every candidate exactly once. Set narrative_closed to true only when the "
-                    "idea is complete at the candidate end. A period alone is not proof of closure: use "
+                    "opening makes sense independently, the idea is developed with sufficient information, "
+                    "and the ending explicitly concludes it without dependence on external context. "
+                    "Use context_before to detect missing premises; context is not part of the clip. "
+                    "A period alone is not proof of closure: use "
                     "context_after to reject a cut that begins a new explanation which continues afterward. "
                     "Score relevance from 0 to 100 for editorial ranking, not as a probability. Give a brief "
                     "rationale. Return only the requested evaluation fields; never create timestamps, text, "
@@ -637,6 +732,7 @@ def _validate_candidates(
         end_ms = candidate.get("end_time_ms")
         transcript = candidate.get("transcript")
         context_after = candidate.get("context_after", "")
+        context_before = candidate.get("context_before", "")
         duration_ms = end_ms - start_ms if type(start_ms) is int and type(end_ms) is int else -1
         if (
             type(candidate_id) is not int
@@ -653,6 +749,7 @@ def _validate_candidates(
             or not isinstance(transcript, str)
             or not transcript.strip()
             or not isinstance(context_after, str)
+            or not isinstance(context_before, str)
         ):
             raise LocalPlanningError("Candidate violates its timing or text bounds", reason="invalid_candidates")
         seen_ids.add(candidate_id)
@@ -663,6 +760,7 @@ def _validate_candidates(
             "duration_seconds": round(duration_ms / 1000, 2),
             "transcript": transcript.strip(),
             "context_after": context_after.strip(),
+            "context_before": context_before.strip(),
         })
     return normalized
 
