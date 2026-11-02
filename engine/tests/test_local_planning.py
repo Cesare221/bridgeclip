@@ -63,6 +63,34 @@ def longform_segments(topic_count):
     return segments
 
 
+def distributed_longform_segments():
+    segments = []
+    timestamp = 0
+    for topic in range(19):
+        words = []
+        for word_index in range(45):
+            text = f"topic{topic}_word{word_index}"
+            if word_index == 44 and topic % 3 != 1:
+                text += "."
+            words.append(
+                TranscriptWord(
+                    text,
+                    timestamp + word_index * 1000,
+                    timestamp + (word_index + 1) * 1000,
+                )
+            )
+        segments.append(
+            TranscriptSegment(
+                start_time_ms=timestamp,
+                end_time_ms=timestamp + 45_000,
+                text=" ".join(word.word for word in words),
+                words=words,
+            )
+        )
+        timestamp += 60_000
+    return segments
+
+
 def run_longform_plan(topic_count, duration_seconds, max_clips=MAX_SELECTED_CLIPS, monkeypatch_budget=None):
     requests = []
 
@@ -220,6 +248,48 @@ def test_candidate_generation_caps_dense_windows_and_reports_pruned_intervals():
     assert stats["candidate_intervals_generated"] > len(candidates)
     assert stats["candidates_discarded_by_window_budget"] > 0
     assert len(candidates) <= 2 * 16
+
+
+def test_candidate_generation_falls_back_to_later_sparse_regions():
+    stats = {}
+    candidates = generate_candidates(
+        distributed_longform_segments(),
+        source_duration_seconds=1_140,
+        stats=stats,
+    )
+
+    assert any(candidate["start_time_ms"] > 240_000 for candidate in candidates)
+    assert stats["fallback_candidates_generated"] > 0
+    assert all(30 <= candidate["duration_seconds"] <= 60 for candidate in candidates)
+    assert all(candidate["end_time_ms"] <= 1_140_000 for candidate in candidates)
+    assert all(candidate["transcript"] for candidate in candidates)
+
+
+def test_shortlist_distributes_candidates_across_later_regions():
+    candidates = [
+        {
+            "id": index,
+            "start_time_ms": index * 120_000 + 1_000,
+            "end_time_ms": index * 120_000 + 41_000,
+            "duration_seconds": 40,
+        }
+        for index in range(8)
+    ]
+
+    result = shortlist_candidates(candidates, limit=6)
+
+    assert len(result) == 6
+    assert [candidate["id"] for candidate in result] == [0, 1, 3, 4, 6, 7]
+    assert len({candidate["start_time_ms"] // 120_000 for candidate in result}) == 6
+
+
+def test_longform_local_plan_can_select_more_than_two_clips():
+    result, metrics, _ = run_longform_plan(19, 1_140)
+
+    assert len(result.segments) > 2
+    assert metrics["budget_exhausted"] is False
+    assert metrics["windows_analyzed"] > 2
+    assert metrics["ollama_request_budget"] <= MAX_OLLAMA_REQUESTS
 
 
 def test_shortlisting_keeps_candidates_across_overlapping_window_edges():

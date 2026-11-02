@@ -40,6 +40,7 @@ TARGET_CANDIDATE_DURATION_SECONDS = 45
 CONTEXT_AFTER_END_MS = 15_000
 MAX_CONTEXT_WORDS = 50
 MAX_PROMPT_CONTEXT_CHARS = 500
+NATURAL_PAUSE_MS = 700
 
 _SENTENCE_END = re.compile(r'[.!?…]["”’)\]]*$')
 
@@ -103,6 +104,7 @@ def generate_candidates(
         "duplicate_candidates": 0,
         "too_few_words": 0,
         "candidate_intervals_generated": 0,
+        "fallback_candidates_generated": 0,
         "time_budget_exhausted": 0,
     })
     min_duration_seconds, max_duration_seconds = resolve_clip_duration_bounds(
@@ -205,6 +207,32 @@ def generate_candidates(
         if time_budget_exhausted:
             break
 
+    missing_windows = _missing_candidate_windows(
+        candidates_by_window,
+        range_start_ms,
+        range_end_ms if range_end_ms is not None else words[-1].end_ms,
+    )
+    for window_index in missing_windows:
+        if deadline is not None and time.perf_counter() >= deadline:
+            time_budget_exhausted = True
+            break
+        fallback = _fallback_candidate(
+            words,
+            window_index,
+            min_duration_ms,
+            max_duration_ms,
+            range_start_ms,
+            range_end_ms,
+            seen,
+            candidate_id,
+        )
+        if fallback is None:
+            continue
+        candidate, candidate_id = fallback
+        candidates_by_window.setdefault(window_index, []).append(candidate)
+        discovery_stats["candidate_intervals_generated"] += 1
+        discovery_stats["fallback_candidates_generated"] += 1
+
     candidates = [
         candidate
         for window_index in sorted(candidates_by_window)
@@ -219,6 +247,114 @@ def generate_candidates(
     )
     discovery_stats["time_budget_exhausted"] = int(time_budget_exhausted)
     return candidates
+
+
+def _missing_candidate_windows(
+    candidates_by_window: dict[int, list[dict[str, Any]]],
+    range_start_ms: int,
+    range_end_ms: int,
+) -> list[int]:
+    first_window = range_start_ms // (CANDIDATE_WINDOW_STRIDE_SECONDS * 1000)
+    last_window = range_end_ms // (CANDIDATE_WINDOW_STRIDE_SECONDS * 1000)
+    return [
+        window_index
+        for window_index in range(first_window, last_window + 1)
+        if not candidates_by_window.get(window_index)
+    ]
+
+
+def _fallback_candidate(
+    words: list[_TimedWord],
+    window_index: int,
+    min_duration_ms: int,
+    max_duration_ms: int,
+    range_start_ms: int,
+    range_end_ms: Optional[int],
+    seen: set[tuple[int, int]],
+    candidate_id: int,
+) -> Optional[tuple[dict[str, Any], int]]:
+    window_start_ms = max(
+        range_start_ms,
+        window_index * CANDIDATE_WINDOW_STRIDE_SECONDS * 1000,
+    )
+    window_end_ms = min(
+        range_end_ms if range_end_ms is not None else words[-1].end_ms,
+        window_start_ms + CANDIDATE_WINDOW_SECONDS * 1000,
+    )
+    start_indices = [
+        index for index, word in enumerate(words)
+        if word.start_ms >= window_start_ms and word.start_ms < window_end_ms
+        and (index == 0 or _is_natural_start(words, index))
+    ]
+    if not start_indices:
+        start_indices = [
+            index for index, word in enumerate(words)
+            if word.start_ms >= window_start_ms and word.start_ms < window_end_ms
+        ]
+    if not start_indices:
+        return None
+
+    start_index = min(
+        start_indices,
+        key=lambda index: abs(words[index].start_ms - window_start_ms),
+    )
+    start_ms = words[start_index].start_ms
+    target_end_ms = start_ms + TARGET_CANDIDATE_DURATION_SECONDS * 1000
+    natural_end_indices = [
+        index for index in range(start_index, len(words))
+        if words[index].end_ms - start_ms >= min_duration_ms
+        and words[index].end_ms - start_ms <= max_duration_ms
+        and (index == len(words) - 1 or _is_natural_end(words, index))
+    ]
+    end_indices = natural_end_indices or [
+        index for index in range(start_index, len(words))
+        if words[index].end_ms - start_ms >= min_duration_ms
+        and words[index].end_ms - start_ms <= max_duration_ms
+    ]
+    if not end_indices:
+        return None
+    end_index = min(
+        end_indices,
+        key=lambda index: abs(words[index].end_ms - target_end_ms),
+    )
+    end_ms = words[end_index].end_ms
+    if end_ms > window_end_ms + WINDOW_OVERLAP_SECONDS * 1000:
+        return None
+    if range_end_ms is not None and end_ms > range_end_ms:
+        return None
+    key = (start_ms, end_ms)
+    if key in seen:
+        return None
+    seen.add(key)
+    selected_words = words[start_index:end_index + 1]
+    return ({
+        "id": candidate_id,
+        "start_time_ms": start_ms,
+        "end_time_ms": end_ms,
+        "duration_seconds": round((end_ms - start_ms) / 1000, 2),
+        "transcript": " ".join(word.text for word in selected_words),
+        "context_after": _context_after(words, end_index, end_ms),
+        "context_before": " ".join(
+            word.text for word in words[max(0, start_index - MAX_CONTEXT_WORDS):start_index]
+        ),
+    }, candidate_id + 1)
+
+
+def _is_natural_start(words: list[_TimedWord], index: int) -> bool:
+    return (
+        _SENTENCE_END.search(words[index - 1].text) is not None
+        or words[index].start_ms - words[index - 1].end_ms >= NATURAL_PAUSE_MS
+    )
+
+
+def _is_natural_end(words: list[_TimedWord], index: int) -> bool:
+    return (
+        _SENTENCE_END.search(words[index].text) is not None
+        or (
+            index + 1 < len(words)
+            and words[index + 1].start_ms - words[index].end_ms >= NATURAL_PAUSE_MS
+        )
+    )
 
 
 def shortlist_candidates(

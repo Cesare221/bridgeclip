@@ -38,7 +38,7 @@ Local mode disables Jev review, paid framing vision, source web research, and au
 
 ## Planning limits
 
-Candidate discovery covers the transcript using overlapping 150-second windows advanced every 120 seconds. It keeps at most 16 generated intervals per two-minute source region, evaluates at most 48 shortlisted candidates, and evaluates at most 24 narrative expansions. Ollama requests contain at most three candidates each. The total request budget scales with source duration and the requested clip ceiling, capped at 32 calls; planning also stops after 15 minutes. If a budget is exhausted, only candidates already evaluated can be returned. These limits bound local CPU work without restricting discovery to the beginning of a long video.
+Candidate discovery covers the transcript using overlapping 150-second windows advanced every 120 seconds. Sentence-bounded intervals are preferred; regions without a valid sentence interval use real word timestamps and natural pauses as a deterministic fallback, without approving the candidate automatically. It keeps at most 16 generated intervals per two-minute source region, evaluates at most 48 shortlisted candidates, and evaluates at most 24 narrative expansions. Ollama requests contain at most three candidates each. The total request budget scales with source duration and the requested clip ceiling, capped at 32 calls; planning also stops after 15 minutes. If a budget is exhausted, only candidates already evaluated can be returned. These limits bound local CPU work without restricting discovery to the beginning of a long video.
 
 ## Optional Windows render smoke test
 
