@@ -12,6 +12,8 @@ export const DURATION_OPTIONS = [
 /** Version 4 adds the offline local provider while preserving v3 requests. */
 export const BRIDGE_CONTRACT_VERSION = 4
 
+export const MAX_LOCAL_CLIPS = 15
+
 /** Longest "What to clip" description sent to the planner. */
 export const CLIP_REQUEST_MAX_CHARS = 1000
 

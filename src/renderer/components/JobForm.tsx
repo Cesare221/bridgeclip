@@ -15,7 +15,7 @@ import { TextArea, TextInput } from './ui/Field'
 import { IconTile } from './ui/IconTile'
 import { SettingRow } from './ui/SettingRow'
 import { onRadioKeyDown } from './ui/Segmented'
-import { CLIP_REQUEST_MAX_CHARS, DURATION_OPTIONS, VIDEO_SPEED_OPTIONS } from '../../shared/job-contract'
+import { CLIP_REQUEST_MAX_CHARS, DURATION_OPTIONS, VIDEO_SPEED_OPTIONS, MAX_LOCAL_CLIPS } from '../../shared/job-contract'
 import { isModelId } from '../../shared/openrouter-models'
 import { useModelStore } from '../store/use-model-store'
 import { useSettingsStore } from '../store/use-settings-store'
@@ -36,6 +36,7 @@ const LAYOUT_STYLES = [
 ] as const
 
 const MAX_CLIPS = 100
+const LOCAL_CLIP_OPTIONS = [1, 2, 3, 5, 10, MAX_LOCAL_CLIPS] as const
 
 export const WIZARD_STEPS: { id: WizardStep; label: string; title: string; description: string }[] = [
   { id: 'video', label: 'Video', title: 'Choose a video', description: 'A local file, YouTube link or Twitch VOD link. Optionally suggest where to find clips.' },
@@ -67,7 +68,7 @@ export function buildJobRequest(draft: ClipDraft, trim: { start: number | null; 
     clippingMode: draft.clippingMode,
     ...(draft.clippingMode === 'advanced' ? { plannerModel: draft.plannerModel, transcriptionModel: draft.transcriptionModel } : {}),
     ...(draft.clipRequest?.trim() ? { clipRequest: draft.clipRequest.trim() } : {}),
-    maxClips: draft.autoClipCount ? null : draft.clippingMode === 'local' ? Math.min(2, draft.maxClips) : draft.maxClips,
+    maxClips: draft.autoClipCount ? null : draft.clippingMode === 'local' ? Math.min(MAX_LOCAL_CLIPS, draft.maxClips) : draft.maxClips,
     autoClipCount: draft.autoClipCount,
     durationRanges: draft.durations.length > 0 ? draft.durations : null,
     aspectRatio: draft.clippingMode === 'local' ? '9:16' : draft.aspectRatio,
@@ -167,7 +168,7 @@ export function JobForm({ onSubmit, onViewJob, blockedReason, submitting, classN
         {step !== 'video' && <div className="mb-3">
           <h2 className="text-sm font-semibold text-ink">{step === 'review' && draft.workflow === 'review' ? 'Ready to find candidates' : meta.title}</h2>
           <p className="mt-0.5 text-xs text-ink-muted">{step === 'review' && draft.workflow === 'review'
-            ? draft.clippingMode === 'local' ? 'Local AI selects up to two candidates; adjust each cut in the editor without paid API calls.' : 'Jev reviews each candidate before the editor opens for your final cut.'
+            ? draft.clippingMode === 'local' ? `Local AI selects up to ${MAX_LOCAL_CLIPS} candidates when quality allows; adjust each cut in the editor without paid API calls.` : 'Jev reviews each candidate before the editor opens for your final cut.'
             : meta.description}</p>
         </div>}
         {sourceError && <p role="alert" className="text-sm text-danger">{sourceError}</p>}
@@ -424,7 +425,7 @@ export function ClippingModePicker({ draft, update, showModels = true }: { draft
     <Group label="Clipping mode">
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4" role="radiogroup" aria-label="Clipping mode">
         {([
-          { id: 'local', label: 'Local', hint: 'Faster-Whisper + Ollama · no API cost · up to 2 clips' },
+          { id: 'local', label: 'Local', hint: `Faster-Whisper + Ollama · no API cost · up to ${MAX_LOCAL_CLIPS} clips` },
           { id: 'quality', label: 'Quality', hint: `GPT-6 Sol planning · ${draft.workflow === 'review' ? 'Jev review required' : `Jev review & repairs ${jevEnabled ? 'enabled' : 'off'}`} · MAI Transcribe 2` },
           { id: 'economy', label: 'Economy', hint: 'GLM 5.3 Flash planning · Whisper Turbo' },
           { id: 'advanced', label: 'Advanced', hint: 'Choose your OpenRouter models' }
@@ -437,7 +438,7 @@ export function ClippingModePicker({ draft, update, showModels = true }: { draft
                 source: isUrl(draft.source) ? '' : draft.source,
                 aspectRatio: '9:16',
                 layoutVision: false,
-                maxClips: Math.min(2, draft.maxClips)
+                maxClips: Math.min(MAX_LOCAL_CLIPS, draft.maxClips)
               } : {})
             })}
             className={cn('glass-tile glass-tile-hover rounded-xl px-3 py-2.5 text-left', selected && 'glass-selected')}>
@@ -450,14 +451,14 @@ export function ClippingModePicker({ draft, update, showModels = true }: { draft
         draft.clippingMode === 'advanced'
           ? <p className="mt-2 text-2xs text-ink-subtle">Choose the OpenRouter models on the Clips step.</p>
           : draft.clippingMode === 'local'
-            ? <p className="mt-2 text-2xs text-ink-subtle">Runs on this computer with the cached Faster-Whisper Base model and Ollama qwen3:1.7b. Requires Ollama to be running with that model installed. Only local 9:16 videos are accepted; zero, one, or two complete non-overlapping clips may be selected.</p>
+            ? <p className="mt-2 text-2xs text-ink-subtle">Runs on this computer with the cached Faster-Whisper Base model and Ollama qwen3:1.7b. Requires Ollama to be running with that model installed. Only local 9:16 videos are accepted; AI may select zero to {MAX_LOCAL_CLIPS} quality-approved, non-overlapping clips.</p>
             : <p className="mt-2 text-2xs text-ink-subtle">Economy uses lower-cost models and skips paid vision checks. Transcription retries temporary errors and can fall back to Whisper Large V3, then MAI Transcribe 2. Clip choices and captions may be less accurate.</p>}
     </Group>
   )
 }
 
 export function ClipsStep({ draft, update }: { draft: ClipDraft; update: Update }): React.JSX.Element {
-  const clipLimit = draft.clippingMode === 'local' ? 2 : MAX_CLIPS
+  const clipLimit = draft.clippingMode === 'local' ? MAX_LOCAL_CLIPS : MAX_CLIPS
   const selectedClipLimit = Math.min(clipLimit, draft.maxClips)
   const toggleDuration = (id: string): void => {
     update({ durations: draft.durations.includes(id) ? draft.durations.filter((d) => d !== id) : [...draft.durations, id] })
@@ -503,37 +504,64 @@ export function ClipsStep({ draft, update }: { draft: ClipDraft; update: Update 
       <Group label="Number of clips">
         <SettingRow
           title="Let AI decide"
-          description="Every moment worth posting."
+          description={draft.clippingMode === 'local'
+            ? `AI selects up to ${MAX_LOCAL_CLIPS} based on narrative quality; it may return fewer or none.`
+            : 'Every moment worth posting.'}
           control={<Switch label="Let AI decide how many clips" checked={draft.autoClipCount} onChange={(autoClipCount) => update({ autoClipCount })} />}
         />
         {!draft.autoClipCount && (
-          <div className="mt-2 flex max-w-xs items-center gap-2 animate-fade-in">
-            <Button
-              iconOnly
-              aria-label="Fewer clips"
-              onClick={() => update({ maxClips: Math.max(1, selectedClipLimit - 1) })}
-              disabled={selectedClipLimit <= 1}
-              icon={<Minus className="h-3.5 w-3.5" />}
-            />
-            <TextInput
-              className="flex-1 rounded-full [&_input]:text-center"
-              inputMode="numeric"
-              value={String(selectedClipLimit)}
-              onChange={(e) => {
-                const n = parseInt(e.target.value.replace(/\D/g, ''), 10)
-                update({ maxClips: Number.isFinite(n) ? Math.min(clipLimit, Math.max(1, n)) : 1 })
-              }}
-              aria-label="Maximum clips"
-              mono
-            />
-            <Button
-              iconOnly
-              aria-label="More clips"
-              onClick={() => update({ maxClips: Math.min(clipLimit, selectedClipLimit + 1) })}
-              disabled={selectedClipLimit >= clipLimit}
-              icon={<Plus className="h-3.5 w-3.5" />}
-            />
-          </div>
+          <>
+            <p className="mt-1 text-2xs text-ink-subtle">
+              {draft.clippingMode === 'local'
+                ? 'This is a maximum, not a target. Local mode returns only candidates that pass quality checks.'
+                : 'Maximum clips to return.'}
+            </p>
+            {draft.clippingMode === 'local' && (
+              <div className="mt-2 grid max-w-md grid-cols-6 gap-1.5 animate-fade-in" role="group" aria-label="Common maximum clip counts">
+                {LOCAL_CLIP_OPTIONS.map((count) => (
+                  <button
+                    key={count}
+                    type="button"
+                    aria-pressed={selectedClipLimit === count}
+                    onClick={() => update({ maxClips: count })}
+                    className={cn(
+                      'glass-tile glass-tile-hover rounded-lg px-2 py-1.5 text-center font-mono text-xs tabular',
+                      selectedClipLimit === count ? 'glass-selected text-ink' : 'text-ink-muted hover:text-ink'
+                    )}
+                  >
+                    {count}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="mt-2 flex max-w-xs items-center gap-2 animate-fade-in">
+              <Button
+                iconOnly
+                aria-label="Fewer clips"
+                onClick={() => update({ maxClips: Math.max(1, selectedClipLimit - 1) })}
+                disabled={selectedClipLimit <= 1}
+                icon={<Minus className="h-3.5 w-3.5" />}
+              />
+              <TextInput
+                className="flex-1 rounded-full [&_input]:text-center"
+                inputMode="numeric"
+                value={String(selectedClipLimit)}
+                onChange={(e) => {
+                  const n = parseInt(e.target.value.replace(/\D/g, ''), 10)
+                  update({ maxClips: Number.isFinite(n) ? Math.min(clipLimit, Math.max(1, n)) : 1 })
+                }}
+                aria-label="Maximum clips"
+                mono
+              />
+              <Button
+                iconOnly
+                aria-label="More clips"
+                onClick={() => update({ maxClips: Math.min(clipLimit, selectedClipLimit + 1) })}
+                disabled={selectedClipLimit >= clipLimit}
+                icon={<Plus className="h-3.5 w-3.5" />}
+              />
+            </div>
+          </>
         )}
       </Group>
     </div>
@@ -594,7 +622,7 @@ function ReviewStep({ draft, trim, onEdit }: {
     { step: 'format', label: 'Pacing', value: draft.workflow === 'review' ? 'Manual · choose your own cuts in the editor' : draft.pacing === 'tight' ? 'Cut dead air' : 'Keep pauses' },
     { step: 'format', label: 'Speed', value: `${draft.videoSpeed ?? 1}×${(draft.videoSpeed ?? 1) === 1 ? ' · Normal' : ' · All exported clips'}` },
     { step: 'clips', label: 'Mode', value: draft.clippingMode === 'local' ? 'Local · no API cost' : draft.clippingMode === 'advanced' ? 'Advanced · custom models' : draft.clippingMode === 'economy' ? 'Economy · lower cost' : 'Quality · higher accuracy' },
-    { step: 'clips', label: 'Clips', value: `${lengths}${(draft.videoSpeed ?? 1) > 1 && draft.durations.length > 0 ? ' of source footage' : ''} · ${draft.autoClipCount ? draft.clippingMode === 'local' ? 'up to 2' : 'AI decides how many' : `Up to ${draft.clippingMode === 'local' ? Math.min(2, draft.maxClips) : draft.maxClips}`}` },
+    { step: 'clips', label: 'Clips', value: `${lengths}${(draft.videoSpeed ?? 1) > 1 && draft.durations.length > 0 ? ' of source footage' : ''} · ${draft.autoClipCount ? draft.clippingMode === 'local' ? `up to ${MAX_LOCAL_CLIPS}, quality-gated` : 'AI decides how many' : `Up to ${draft.clippingMode === 'local' ? Math.min(MAX_LOCAL_CLIPS, draft.maxClips) : draft.maxClips}`}` },
     { step: 'clips', label: 'What to clip', value: draft.clipRequest?.trim() || 'The best moments' },
     { step: 'captions', label: 'Captions', value: draft.includeCaptions ? CAPTION_PRESET_NAMES[draft.captionPreset] ?? draft.captionPreset : 'Off' }
   ]

@@ -174,7 +174,7 @@ def test_local_pipeline_completes_without_candidates_or_external_calls(monkeypat
         "total_estimated_cost_usd": 0.0,
         "cost_incomplete": False,
     }
-    assert planner.arguments["max_clips"] == 2
+    assert planner.arguments["max_clips"] == 15
     assert planner.arguments["include_preliminary"] is False
     assert planner.arguments["jev_enabled"] is False
     assert planner.arguments["frames"] == []

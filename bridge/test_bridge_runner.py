@@ -107,12 +107,17 @@ class BridgeTests(unittest.TestCase):
         with tempfile.NamedTemporaryFile() as source:
             config = self.config(contract_version=4, clipping_mode="local", video_url=source.name)
             self.assertEqual(bridge.validate_config(config), config)
+            self.assertEqual(
+                bridge.validate_config({**config, "max_clips": 15})["max_clips"],
+                15,
+            )
             invalid = (
                 {**config, "contract_version": 3},
                 {**config, "video_url": "https://example.com/video"},
                 {**config, "video_url": "\\\\server\\share\\video.mp4"},
                 {**config, "aspect_ratio": "16:9"},
                 {**config, "output_dir": "\\\\server\\share\\output"},
+                {**config, "max_clips": 16},
             )
             for value in invalid:
                 with self.subTest(value=value), self.assertRaises(ValueError):

@@ -285,12 +285,13 @@ test('job validation rejects malformed options and invalid trim intervals', () =
   assert.doesNotThrow(() => validateJobConfig({ ...job, clippingMode: 'quality' }))
   const local = { ...job, videoUrl: '/tmp/local-video.mp4', clippingMode: 'local', layoutVision: false, maxClips: 2 }
   assert.doesNotThrow(() => validateJobConfig(local))
+  assert.doesNotThrow(() => validateJobConfig({ ...local, maxClips: 15 }))
   assert.doesNotThrow(() => validateJobConfig({ ...local, maxClips: null }))
   for (const patch of [
     { videoUrl: 'https://example.com/video' },
     { aspectRatio: '16:9' },
     { layoutVision: true },
-    { maxClips: 3 },
+    { maxClips: 16 },
     { bannerPlatform: 'youtube' }
   ]) assert.throws(() => validateJobConfig({ ...local, ...patch }))
   const advanced = { ...job, clippingMode: 'advanced', plannerModel: 'google/gemini-3.8-flash', transcriptionModel: 'openai/whisper-large-v3' }

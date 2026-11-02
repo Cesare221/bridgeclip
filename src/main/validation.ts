@@ -2,7 +2,7 @@ import { normalizeVideoSource, twitchSourceError } from '../shared/video-source'
 import { isAbsolute } from 'path'
 import type { ClipJobConfig } from './pipeline-runner'
 import { isWebUrl } from './security'
-import { CLIP_REQUEST_MAX_CHARS, DURATION_IDS, isVideoSpeed } from '../shared/job-contract'
+import { CLIP_REQUEST_MAX_CHARS, DURATION_IDS, isVideoSpeed, MAX_LOCAL_CLIPS } from '../shared/job-contract'
 import { isModelId } from '../shared/openrouter-models'
 import type { ClipJobRequest } from '../shared/jobs'
 
@@ -30,7 +30,7 @@ export function validateJobConfig(value: unknown): ClipJobConfig {
   if (v.clippingMode === 'local' && isWebUrl(v.videoUrl)) throw new Error('Local mode requires a video selected from this computer')
   if (v.clippingMode === 'local' && v.aspectRatio !== '9:16') throw new Error('Local mode supports vertical 9:16 clips only')
   if (v.clippingMode === 'local' && v.layoutVision) throw new Error('AI vision is unavailable in Local mode')
-  if (v.clippingMode === 'local' && v.maxClips !== null && v.maxClips > 2) throw new Error('Local mode supports up to two clips')
+  if (v.clippingMode === 'local' && v.maxClips !== null && v.maxClips > MAX_LOCAL_CLIPS) throw new Error(`Local mode supports up to ${MAX_LOCAL_CLIPS} clips`)
   if (v.clippingMode === 'local' && (v.bannerPlatform !== null || v.bannerChannelUrl !== null)) throw new Error('External posting is unavailable in Local mode')
   if (v.maxClips !== null && (!Number.isInteger(v.maxClips) || v.maxClips < 1 || v.maxClips > 100)) throw new Error('Clip count must be between 1 and 100')
   for (const [key, allowed] of Object.entries({ aspectRatio: ['9:16', '16:9'], layoutStyle: ['auto', 'fill', 'fit'], pacing: ['tight', 'natural'] })) {

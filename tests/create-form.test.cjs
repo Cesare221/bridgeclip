@@ -127,7 +127,7 @@ test('clipping mode is selectable and economy disables paid vision in the submit
   assert.equal(buildJobRequest({ ...draft, clippingMode: 'quality' }, { start: null, end: null }).layoutVision, true)
 })
 
-test('local mode is offline-only, vertical, keyless, and capped at two candidates', () => {
+test('local mode is offline-only, vertical, keyless, and caps candidates at fifteen', () => {
   const { ClipsStep, buildJobRequest } = form.exports
   const draft = {
     workflow: 'review', source: 'C:\\Users\\me\\Videos\\source.mp4', clippingMode: 'local', aspectRatio: '16:9',
@@ -137,13 +137,16 @@ test('local mode is offline-only, vertical, keyless, and capped at two candidate
   const html = renderToStaticMarkup(React.createElement(form.exports.ClippingModePicker, { draft, update() {} }))
   const request = buildJobRequest(draft, { start: null, end: null })
   assert.match(html, /Faster-Whisper \+ Ollama/)
-  assert.match(html, /zero, one, or two complete non-overlapping clips/)
-  assert.match(renderToStaticMarkup(React.createElement(ClipsStep, { draft, update() {} })), /aria-label="Maximum clips"[^>]*value="2"/)
+  assert.match(html, /zero to 15 quality-approved, non-overlapping clips/)
+  const clipsHtml = renderToStaticMarkup(React.createElement(ClipsStep, { draft, update() {} }))
+  assert.match(clipsHtml, /aria-label="Maximum clips"[^>]*value="8"/)
+  assert.match(clipsHtml, /aria-label="Common maximum clip counts"/)
+  assert.match(clipsHtml, /This is a maximum, not a target/)
   assert.equal(request.clippingMode, 'local')
   assert.equal(request.videoUrl, draft.source)
   assert.equal(request.aspectRatio, '9:16')
   assert.equal(request.layoutVision, false)
-  assert.equal(request.maxClips, 2)
+  assert.equal(request.maxClips, 8)
 
   const localPicker = renderToStaticMarkup(React.createElement(SourcePicker, {
     value: '', onChange() {}, localOnly: true

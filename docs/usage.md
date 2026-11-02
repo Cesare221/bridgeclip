@@ -40,7 +40,7 @@ In **Create**, choose a workflow before continuing: **Automatic · Beginner frie
 
 ### Models
 
-In **Create → Clips**, choose **Quality**, **Economy**, **Advanced**, or **Local**. Advanced offers searchable OpenRouter model pickers for transcription and clip planning, with model IDs, planning prices and compatibility notes. Both selections are required and appear in Review. Advanced retries the selected models without automatically switching models. Transcription must provide word timestamps; planning must support structured output. Local uses Faster-Whisper Base and Ollama `qwen3:1.7b` on this computer, accepts only local video files, and selects up to two vertical candidates without paid API calls. See [Local AI mode](local-ai.md) and [model selection and transcription](transcription.md).
+In **Create → Clips**, choose **Quality**, **Economy**, **Advanced**, or **Local**. Advanced offers searchable OpenRouter model pickers for transcription and clip planning, with model IDs, planning prices and compatibility notes. Both selections are required and appear in Review. Advanced retries the selected models without automatically switching models. Transcription must provide word timestamps; planning must support structured output. Local uses Faster-Whisper Base and Ollama `qwen3:1.7b` on this computer, accepts only local video files, and selects up to 15 quality-approved vertical candidates without paid API calls. Its automatic count is a ceiling, not a target. See [Local AI mode](local-ai.md) and [model selection and transcription](transcription.md).
 
 ### Framing, captions and speed
 

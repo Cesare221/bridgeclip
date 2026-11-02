@@ -120,7 +120,7 @@ def test_review_and_automatic_keep_two_disjoint_expansions(climate_transcript):
                 "end_time_ms": item["end_time_ms"] + 70_000} for item in candidates]
     for review in (False, True):
         selected, _, _ = run_selection(candidates + shifted, review=review, source_duration_seconds=130)
-        assert len(selected) <= 2
+        assert len(selected) <= local_planning.MAX_SELECTED_CLIPS
         assert all(left["end_time_ms"] <= right["start_time_ms"] for left, right in zip(selected, selected[1:]))
         assert all(30 <= item["duration_seconds"] <= 60 for item in selected)
 
@@ -143,8 +143,11 @@ def test_global_expansion_budget_and_no_repeated_evaluations(climate_transcript)
     batches = [json.loads(payload["messages"][1]["content"])["candidates"] for payload in requests]
     ids = [item["id"] for batch in batches for item in batch]
     assert len(ids) == len(set(ids))
-    assert 12 < len(ids) <= 24
-    assert len(requests) <= 8
+    assert 12 < len(ids) <= (
+        local_planning.MAX_CANDIDATES_FOR_OLLAMA
+        + local_planning.MAX_EXPANSIONS_FOR_OLLAMA
+    )
+    assert len(requests) <= local_planning.MAX_OLLAMA_REQUESTS
     assert all(len(batch) <= 3 for batch in batches)
 
 

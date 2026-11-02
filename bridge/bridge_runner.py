@@ -33,6 +33,7 @@ _protocol = None
 DURATION_RANGE_IDS = ("xshort", "short", "medium", "long", "xlong", "extended", "feature")
 # Mirror the engine contract while rejecting input before importing the engine.
 SUPPORTED_CONTRACT_VERSIONS = (3, 4)
+MAX_LOCAL_CLIPS = 15
 LOCAL_CREDENTIAL_ENV_VARS = (
     "OPENROUTER_API_KEY",
     "ZERNIO_API_KEY",
@@ -401,6 +402,8 @@ def validate_config(config: object) -> dict:
     count = config.get("max_clips")
     if count is not None and (type(count) is not int or not 1 <= count <= 100):
         raise ValueError("max_clips must be between 1 and 100")
+    if clipping_mode == "local" and count is not None and count > MAX_LOCAL_CLIPS:
+        raise ValueError(f"Local mode supports up to {MAX_LOCAL_CLIPS} clips")
     aspect_ratio = config.get("aspect_ratio", "9:16")
     if aspect_ratio not in ("9:16", "16:9"):
         raise ValueError("Invalid aspect ratio")

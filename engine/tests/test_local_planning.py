@@ -6,10 +6,13 @@ import httpx
 import pytest
 
 from clip_engine.services.local_planning import (
+    MAX_OLLAMA_REQUESTS,
+    MAX_SELECTED_CLIPS,
     LocalPlanningError,
     LocalPlanningService,
     _build_ollama_payload,
     generate_candidates,
+    shortlist_candidates,
     select_non_overlapping_candidates,
 )
 from clip_engine.services.transcription_service import (
@@ -39,6 +42,57 @@ def transcript_segments(sentence_count=3):
             )
         )
     return segments
+
+
+def longform_segments(topic_count):
+    segments = []
+    for topic in range(topic_count):
+        start = topic * 60_000
+        words = []
+        for word_index in range(45):
+            text = f"topic{topic}_word{word_index}"
+            if word_index == 44:
+                text += "."
+            words.append(TranscriptWord(text, start + word_index * 1000, start + (word_index + 1) * 1000))
+        segments.append(TranscriptSegment(
+            start_time_ms=words[0].start_time_ms,
+            end_time_ms=words[-1].end_time_ms,
+            text=" ".join(word.word for word in words),
+            words=words,
+        ))
+    return segments
+
+
+def run_longform_plan(topic_count, duration_seconds, max_clips=MAX_SELECTED_CLIPS, monkeypatch_budget=None):
+    requests = []
+
+    async def handle(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        prompt = json.loads(payload["messages"][1]["content"])
+        return httpx.Response(200, json=response_for([
+            evaluation(candidate["id"], score=90 - candidate["id"] % 5)
+            for candidate in prompt["candidates"]
+        ]))
+
+    async def run():
+        async with httpx.AsyncClient(
+            base_url="http://127.0.0.1:11434",
+            transport=httpx.MockTransport(handle),
+        ) as client:
+            planner = LocalPlanningService(http_client=client)
+            result = await planner.plan_clips(
+                TranscriptionResult(
+                    segments=longform_segments(topic_count),
+                    full_text="",
+                    duration_seconds=duration_seconds,
+                ),
+                video_metadata=SimpleNamespace(duration_seconds=duration_seconds),
+                max_clips=max_clips,
+            )
+            return result, dict(planner.planning_metrics), requests
+
+    return asyncio.run(run())
 
 
 def response_for(evaluations):
@@ -137,6 +191,55 @@ def test_candidate_generation_rejects_words_outside_video_duration():
     assert error.value.reason == "invalid_transcript_timestamps"
 
 
+def test_candidate_generation_caps_dense_windows_and_reports_pruned_intervals():
+    segments = []
+    for sentence in range(60):
+        start = sentence * 3000
+        words = [
+            TranscriptWord(
+                f"sentence{sentence}_word{index}" + ("." if index == 9 else ""),
+                start + index * 300,
+                start + (index + 1) * 300,
+            )
+            for index in range(10)
+        ]
+        segments.append(TranscriptSegment(
+            start_time_ms=words[0].start_time_ms,
+            end_time_ms=words[-1].end_time_ms,
+            text=" ".join(word.word for word in words),
+            words=words,
+        ))
+    stats = {}
+
+    candidates = generate_candidates(
+        segments,
+        source_duration_seconds=180,
+        stats=stats,
+    )
+
+    assert stats["candidate_intervals_generated"] > len(candidates)
+    assert stats["candidates_discarded_by_window_budget"] > 0
+    assert len(candidates) <= 2 * 16
+
+
+def test_shortlisting_keeps_candidates_across_overlapping_window_edges():
+    candidates = [
+        {
+            "id": index,
+            "start_time_ms": start,
+            "end_time_ms": start + 40_000,
+            "duration_seconds": 40,
+        }
+        for index, start in enumerate((119_000, 121_000))
+    ]
+    stats = {}
+
+    result = shortlist_candidates(candidates, limit=10, stats=stats)
+
+    assert [candidate["id"] for candidate in result] == [0, 1]
+    assert stats["windows_analyzed"] == 2
+
+
 def test_ollama_payload_is_local_structured_and_includes_context():
     candidates = make_candidates()[:2]
     payload = _build_ollama_payload(candidates, "only the pricing section")
@@ -161,9 +264,9 @@ def test_selection_retries_one_malformed_response_and_keeps_only_closed_candidat
             {"message": {"content": '{"evaluations": []}'}},
             response_for([
                 evaluation(0, closed=True, score=90),
+                evaluation(1, closed=False, score=70),
                 evaluation(2, closed=False, score=100),
             ]),
-            response_for([evaluation(1, closed=False)]),
         ],
         captured,
     )
@@ -171,7 +274,7 @@ def test_selection_retries_one_malformed_response_and_keeps_only_closed_candidat
 
     selected = asyncio.run(select_and_close(planner, candidates))
 
-    assert len(requests) == 3
+    assert len(requests) == 2
     assert [candidate["id"] for candidate in selected] == [0]
     assert selected[0]["relevance_score"] == 90
     assert selected[0]["narrative_closed"] is True
@@ -182,14 +285,15 @@ def test_review_can_include_preliminary_candidates_without_changing_automatic_se
     candidates = make_candidates()
     evaluations = [
         evaluation(0, closed=False, score=90, rationale="Preliminary."),
+        evaluation(1, closed=False, score=70, rationale="Expansion candidate."),
         evaluation(2, closed=True, score=80, rationale="Closed narrative."),
     ]
 
-    automatic_client, _ = fake_client([response_for(evaluations), response_for([evaluation(1, closed=False)])])
+    automatic_client, _ = fake_client([response_for(evaluations)])
     automatic = LocalPlanningService(http_client=automatic_client)
     selected = asyncio.run(select_and_close(automatic, candidates))
 
-    review_client, _ = fake_client([response_for(evaluations), response_for([evaluation(1, closed=False)])])
+    review_client, _ = fake_client([response_for(evaluations)])
     review = LocalPlanningService(http_client=review_client)
     preliminary = asyncio.run(
         select_and_close(review, candidates, include_preliminary=True)
@@ -204,6 +308,7 @@ def test_review_can_include_preliminary_candidates_without_changing_automatic_se
     assert [
         candidate["decision"] for candidate in review.selection_diagnostics
     ] == [
+        "narrative_not_closed",
         "narrative_not_closed",
         "selected",
     ]
@@ -249,6 +354,31 @@ def test_unavailable_ollama_has_an_actionable_local_error():
     with pytest.raises(LocalPlanningError, match="Start Ollama") as error:
         asyncio.run(select_and_close(planner, make_candidates()))
     assert error.value.reason == "ollama_unavailable"
+    assert planner.planning_metrics["evaluation_failure_reason"] == "ollama_unavailable"
+    assert planner.planning_metrics["ollama_calls"] == 1
+
+
+def test_ollama_timeout_is_reported_as_a_local_planning_failure():
+    client, _ = fake_client([httpx.ReadTimeout("slow model")])
+    planner = LocalPlanningService(http_client=client)
+
+    with pytest.raises(LocalPlanningError) as error:
+        asyncio.run(select_and_close(planner, make_candidates()))
+
+    assert error.value.reason == "ollama_timeout"
+    assert planner.planning_metrics["evaluation_failure_reason"] == "ollama_timeout"
+
+
+def test_local_planning_propagates_cancellation():
+    planner = LocalPlanningService()
+
+    async def cancel_request(*_args, **_kwargs):
+        raise asyncio.CancelledError
+
+    planner._evaluate_candidates = cancel_request
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(select_and_close(planner, make_candidates()))
 
 
 def test_missing_ollama_model_has_an_install_instruction():
@@ -294,10 +424,100 @@ def test_overlap_selection_allows_one_or_zero_results():
     ) == []
 
 
+def test_interval_selection_honors_each_manual_maximum_without_filling():
+    candidates = [
+        {
+            "id": index,
+            "start_time_ms": index * 60_000,
+            "end_time_ms": index * 60_000 + 45_000,
+            "narrative_closed": True,
+            "relevance_score": 90,
+        }
+        for index in range(15)
+    ]
+
+    for maximum in (1, 2, 5, 10, 15):
+        selected = select_non_overlapping_candidates(candidates, max_clips=maximum)
+        assert len(selected) == maximum
+        assert all(
+            left["end_time_ms"] <= right["start_time_ms"]
+            for left, right in zip(selected, selected[1:])
+        )
+
+    assert len(select_non_overlapping_candidates(candidates[:1], max_clips=15)) == 1
+
+
+def test_three_minute_video_returns_only_existing_complete_candidates():
+    result, metrics, _ = run_longform_plan(topic_count=1, duration_seconds=180)
+
+    assert result.total_clips == 1
+    assert metrics["candidates_discovered"] == 1
+    assert metrics["selected_candidates"] == 1
+
+
+def test_nineteen_minute_video_can_select_more_than_two_disjoint_candidates():
+    result, metrics, _ = run_longform_plan(topic_count=19, duration_seconds=19 * 60)
+
+    assert result.total_clips > 2
+    assert result.total_clips <= MAX_SELECTED_CLIPS
+    assert [segment.start_time_ms for segment in result.segments] == sorted(
+        segment.start_time_ms for segment in result.segments
+    )
+    assert all(
+        left.end_time_ms <= right.start_time_ms
+        for left, right in zip(result.segments, result.segments[1:])
+    )
+    assert metrics["windows_analyzed"] > 2
+    assert metrics["ollama_calls"] <= metrics["ollama_request_budget"]
+
+
+def test_sixty_minute_video_keeps_model_work_bounded_and_context_local():
+    result, metrics, requests = run_longform_plan(topic_count=60, duration_seconds=60 * 60)
+
+    assert result.total_clips == MAX_SELECTED_CLIPS
+    assert metrics["candidates_discovered"] == 60
+    assert metrics["candidates_shortlisted"] <= 48
+    assert metrics["ollama_calls"] <= metrics["ollama_request_budget"] <= MAX_OLLAMA_REQUESTS
+    assert all(
+        len(json.loads(payload["messages"][1]["content"])["candidates"]) <= 3
+        for payload in requests
+    )
+    assert all(
+        "transcript" not in json.loads(payload["messages"][1]["content"])
+        for payload in requests
+    )
+
+
+def test_exhausted_ollama_budget_returns_only_evaluated_candidates(monkeypatch):
+    monkeypatch.setattr("clip_engine.services.local_planning._ollama_request_budget", lambda *_: 1)
+
+    result, metrics, requests = run_longform_plan(topic_count=15, duration_seconds=15 * 60)
+
+    assert result.total_clips == 3
+    assert metrics["ollama_calls"] == 1
+    assert metrics["budget_exhausted"] is True
+    assert len(requests) == 1
+
+
+def test_time_budget_exhaustion_returns_without_model_requests(monkeypatch):
+    monkeypatch.setattr("clip_engine.services.local_planning.MAX_PLANNING_SECONDS", 0)
+
+    result, metrics, requests = run_longform_plan(topic_count=5, duration_seconds=5 * 60)
+
+    assert result.total_clips == 0
+    assert metrics["budget_exhausted"] is True
+    assert metrics["budget_exhaustion_reason"] == "time_limit"
+    assert requests == []
+
+
 def test_plan_clips_returns_shared_clip_plan_without_api_costs():
     candidates = make_candidates()
     client, _ = fake_client([
-        response_for([evaluation(0, score=90), evaluation(2, score=80)])
+        response_for([
+            evaluation(0, score=90),
+            evaluation(1, closed=False, score=75),
+            evaluation(2, closed=False, score=80),
+        ])
     ])
     planner = LocalPlanningService(http_client=client)
     result = asyncio.run(

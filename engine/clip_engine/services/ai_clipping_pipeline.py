@@ -61,7 +61,7 @@ from clip_engine.services.transcription_service import (
     TranscriptionService,
 )
 from clip_engine.services.faster_whisper_service import FasterWhisperTranscriptionService
-from clip_engine.services.local_planning import LocalPlanningService
+from clip_engine.services.local_planning import LocalPlanningService, MAX_SELECTED_CLIPS
 from clip_engine.services.visual_clip_sampling import has_visual_change, sample_visual_planning_frames
 from clip_engine.services.video_downloader import (
     DownloadResult,
@@ -455,7 +455,7 @@ class AIClippingPipeline:
             )
             if self.local_provider:
                 planning_args["max_clips"] = (
-                    2 if request.max_clips is None else min(2, request.max_clips)
+                    MAX_SELECTED_CLIPS if request.max_clips is None else request.max_clips
                 )
                 planning_args["include_preliminary"] = request.workflow == "review"
                 previous_planning_progress = self.intelligence_planner.progress_callback
@@ -470,33 +470,56 @@ class AIClippingPipeline:
                     clip_plan = await self.intelligence_planner.plan_clips(**planning_args)
                 finally:
                     self.intelligence_planner.progress_callback = previous_planning_progress
+                    selection_diagnostics = getattr(
+                        self.intelligence_planner, "selection_diagnostics", []
+                    )
+                    selection_metrics = getattr(
+                        self.intelligence_planner, "planning_metrics", {}
+                    )
+                    if not isinstance(selection_diagnostics, list):
+                        raise TypeError("Local planner diagnostics must be a list")
+                    if not isinstance(selection_metrics, dict):
+                        raise TypeError("Local planner metrics must be an object")
+                    safe_selection_metrics = {
+                        key: value
+                        for key, value in selection_metrics.items()
+                        if not key.startswith("_")
+                    }
+                    started_at = selection_metrics.get("_started_at")
+                    if (
+                        "planning_seconds" not in safe_selection_metrics
+                        and isinstance(started_at, (int, float))
+                    ):
+                        safe_selection_metrics["planning_seconds"] = round(
+                            max(0.0, time.perf_counter() - started_at),
+                            3,
+                        )
+                    self._save_local_json(
+                        job_id,
+                        "selection_diagnostics",
+                        {
+                            "version": 1,
+                            "candidates": selection_diagnostics,
+                            "metrics": safe_selection_metrics,
+                        },
+                    )
+                    edit_audit["local_selection"] = {
+                        "evaluated_candidates": len(selection_diagnostics),
+                        "selected_candidates": sum(
+                            item.get("decision") == "selected"
+                            for item in selection_diagnostics
+                            if isinstance(item, dict)
+                        ),
+                        "preliminary_candidates": sum(
+                            item.get("decision") != "selected"
+                            for item in selection_diagnostics
+                            if isinstance(item, dict)
+                        ),
+                        "metrics": safe_selection_metrics,
+                    }
             else:
                 clip_plan = await self.intelligence_planner.plan_clips(**planning_args)
             edit_audit['planner'] = getattr(self.intelligence_planner, 'audit', {'requests': []})
-            if self.local_provider:
-                selection_diagnostics = getattr(
-                    self.intelligence_planner, "selection_diagnostics", []
-                )
-                if not isinstance(selection_diagnostics, list):
-                    raise TypeError("Local planner diagnostics must be a list")
-                self._save_local_json(
-                    job_id,
-                    "selection_diagnostics",
-                    {"version": 1, "candidates": selection_diagnostics},
-                )
-                edit_audit["local_selection"] = {
-                    "evaluated_candidates": len(selection_diagnostics),
-                    "selected_candidates": sum(
-                        item.get("decision") == "selected"
-                        for item in selection_diagnostics
-                        if isinstance(item, dict)
-                    ),
-                    "preliminary_candidates": sum(
-                        item.get("decision") != "selected"
-                        for item in selection_diagnostics
-                        if isinstance(item, dict)
-                    ),
-                }
             stage_timings["planning"] = time.perf_counter() - stage_start
             logger.info(f"Planned {len(clip_plan.segments)} clips")
             if not clip_plan.segments:
@@ -585,7 +608,14 @@ class AIClippingPipeline:
                 return ClippingJobResult(job_id=job_id, status=JobStatus.COMPLETED, output=output,
                     processing_time_seconds=time.time() - start_time)
             accepted = []
-            limit = getattr(self.intelligence_planner, 'discovery_limit', None) or request.max_clips or self.settings.max_clips_absolute
+            limit = getattr(self.intelligence_planner, 'discovery_limit', None)
+            if not limit:
+                if request.max_clips is not None:
+                    limit = request.max_clips
+                elif self.local_provider:
+                    limit = MAX_SELECTED_CLIPS
+                else:
+                    limit = self.settings.max_clips_absolute
             pending = clip_plan.segments
             for discovery_pass in (1, 2):
                 for segment in pending:

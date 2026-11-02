@@ -6,8 +6,9 @@ import json
 import logging
 import math
 import re
+import time
+from bisect import bisect_right
 from dataclasses import dataclass
-from itertools import combinations
 from numbers import Real
 from typing import Any, Callable, Optional
 
@@ -22,10 +23,18 @@ logger = logging.getLogger(__name__)
 OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 OLLAMA_MODEL = "qwen3:1.7b"
 OLLAMA_TIMEOUT_SECONDS = 300.0
-MAX_CANDIDATES_FOR_OLLAMA = 12
-MAX_SELECTED_CLIPS = 2
+MAX_CANDIDATES_FOR_OLLAMA = 48
+MAX_SELECTED_CLIPS = 15
 MAX_EXPANSIONS_PER_CANDIDATE = 4
-MAX_EXPANSIONS_FOR_OLLAMA = 12
+MAX_EXPANSIONS_FOR_OLLAMA = 24
+MAX_OLLAMA_REQUESTS = 32
+MAX_PLANNING_SECONDS = 900
+MAX_CANDIDATE_WINDOWS = 48
+MAX_CANDIDATES_PER_WINDOW = 3
+MAX_GENERATED_CANDIDATES_PER_WINDOW = 16
+CANDIDATE_WINDOW_SECONDS = 150
+CANDIDATE_WINDOW_STRIDE_SECONDS = 120
+WINDOW_OVERLAP_SECONDS = CANDIDATE_WINDOW_SECONDS - CANDIDATE_WINDOW_STRIDE_SECONDS
 MIN_CANDIDATE_WORDS = 40
 TARGET_CANDIDATE_DURATION_SECONDS = 45
 CONTEXT_AFTER_END_MS = 15_000
@@ -84,8 +93,18 @@ def generate_candidates(
     max_duration_seconds: int = 60,
     start_time_seconds: Optional[float] = None,
     end_time_seconds: Optional[float] = None,
+    stats: Optional[dict[str, int]] = None,
+    deadline: Optional[float] = None,
 ) -> list[dict[str, Any]]:
     """Build sentence-bounded candidate clips from word-timed transcript data."""
+    discovery_stats = stats if stats is not None else {}
+    discovery_stats.update({
+        "duration_rejections": 0,
+        "duplicate_candidates": 0,
+        "too_few_words": 0,
+        "candidate_intervals_generated": 0,
+        "time_budget_exhausted": 0,
+    })
     min_duration_seconds, max_duration_seconds = resolve_clip_duration_bounds(
         None, min_duration_seconds, max_duration_seconds
     )
@@ -98,6 +117,7 @@ def generate_candidates(
 
     words = _flatten_words(transcript_segments, source_duration_seconds)
     if not words:
+        discovery_stats["candidates_discarded_by_window_budget"] = 0
         return []
 
     sentence_starts = [0]
@@ -117,34 +137,50 @@ def generate_candidates(
         else round(source_duration_seconds * 1000) if source_duration_seconds is not None
         else None
     )
-    candidates: list[dict[str, Any]] = []
+    candidates_by_window: dict[int, list[dict[str, Any]]] = {}
     seen: set[tuple[int, int]] = set()
+    candidate_id = 0
+    target_duration_seconds = (min_duration_seconds + max_duration_seconds) / 2
+    time_budget_exhausted = False
 
     for start_index in sentence_starts:
+        if deadline is not None and time.perf_counter() >= deadline:
+            time_budget_exhausted = True
+            break
         start_ms = words[start_index].start_ms
         if start_ms < range_start_ms:
             continue
-        for end_index in sentence_ends:
-            if end_index <= start_index:
-                continue
+        end_position = bisect_right(sentence_ends, start_index)
+        while end_position < len(sentence_ends):
+            if deadline is not None and time.perf_counter() >= deadline:
+                time_budget_exhausted = True
+                break
+            end_index = sentence_ends[end_position]
             end_ms = words[end_index].end_ms
             duration_ms = end_ms - start_ms
             if duration_ms > max_duration_ms:
+                discovery_stats["duration_rejections"] += 1
                 break
             if duration_ms < min_duration_ms or end_ms < start_ms:
+                discovery_stats["duration_rejections"] += 1
+                end_position += 1
                 continue
             if range_end_ms is not None and end_ms > range_end_ms:
                 break
 
             selected_words = words[start_index:end_index + 1]
             if len(selected_words) < MIN_CANDIDATE_WORDS:
+                discovery_stats["too_few_words"] += 1
+                end_position += 1
                 continue
             key = (start_ms, end_ms)
             if key in seen:
+                discovery_stats["duplicate_candidates"] += 1
+                end_position += 1
                 continue
             seen.add(key)
-            candidates.append({
-                "id": len(candidates),
+            candidate = {
+                "id": candidate_id,
                 "start_time_ms": start_ms,
                 "end_time_ms": end_ms,
                 "duration_seconds": round(duration_ms / 1000, 2),
@@ -153,8 +189,35 @@ def generate_candidates(
                 "context_before": " ".join(
                     word.text for word in words[max(0, start_index - MAX_CONTEXT_WORDS):start_index]
                 ),
-            })
+            }
+            candidate_id += 1
+            discovery_stats["candidate_intervals_generated"] += 1
+            window_index = start_ms // (CANDIDATE_WINDOW_STRIDE_SECONDS * 1000)
+            window_candidates = candidates_by_window.setdefault(window_index, [])
+            window_candidates.append(candidate)
+            if len(window_candidates) > MAX_GENERATED_CANDIDATES_PER_WINDOW * 2:
+                candidates_by_window[window_index] = _limit_window_candidates(
+                    window_candidates,
+                    MAX_GENERATED_CANDIDATES_PER_WINDOW,
+                    target_duration_seconds,
+                )
+            end_position += 1
+        if time_budget_exhausted:
+            break
 
+    candidates = [
+        candidate
+        for window_index in sorted(candidates_by_window)
+        for candidate in _limit_window_candidates(
+            candidates_by_window[window_index],
+            MAX_GENERATED_CANDIDATES_PER_WINDOW,
+            target_duration_seconds,
+        )
+    ]
+    discovery_stats["candidates_discarded_by_window_budget"] = (
+        discovery_stats["candidate_intervals_generated"] - len(candidates)
+    )
+    discovery_stats["time_budget_exhausted"] = int(time_budget_exhausted)
     return candidates
 
 
@@ -162,77 +225,163 @@ def shortlist_candidates(
     candidates: list[dict[str, Any]],
     limit: int = MAX_CANDIDATES_FOR_OLLAMA,
     target_duration_seconds: float = TARGET_CANDIDATE_DURATION_SECONDS,
+    *,
+    stats: Optional[dict[str, int]] = None,
 ) -> list[dict[str, Any]]:
-    """Keep the closest-to-target candidate per 20-second source bucket."""
+    """Sample sentence-bounded candidates evenly across overlapping time windows."""
     if limit < 1:
         raise ValueError("Candidate shortlist limit must be positive")
 
-    best_by_bucket: dict[int, dict[str, Any]] = {}
+    stride_ms = CANDIDATE_WINDOW_STRIDE_SECONDS * 1000
+    overlap_ms = WINDOW_OVERLAP_SECONDS * 1000
+    candidates_by_window: dict[int, list[dict[str, Any]]] = {}
     for candidate in candidates:
-        bucket = candidate["start_time_ms"] // 20_000
-        current = best_by_bucket.get(bucket)
-        if current is None or _duration_distance(candidate, target_duration_seconds) < _duration_distance(
-            current, target_duration_seconds
-        ):
-            best_by_bucket[bucket] = candidate
+        start_ms = candidate["start_time_ms"]
+        window_index = start_ms // stride_ms
+        candidates_by_window.setdefault(window_index, []).append(candidate)
+        if window_index > 0 and start_ms < window_index * stride_ms + overlap_ms:
+            candidates_by_window.setdefault(window_index - 1, []).append(candidate)
 
-    shortlist = sorted(best_by_bucket.values(), key=lambda candidate: candidate["start_time_ms"])
-    if len(shortlist) <= limit:
-        return shortlist
+    window_indices = sorted(candidates_by_window)
+    if len(window_indices) > MAX_CANDIDATE_WINDOWS:
+        sampled = _evenly_spaced_indices(len(window_indices), MAX_CANDIDATE_WINDOWS)
+        window_indices = [window_indices[index] for index in sampled]
+
+    unique: dict[int, dict[str, Any]] = {}
+    for window_index in window_indices:
+        in_window = sorted(
+            candidates_by_window[window_index],
+            key=lambda candidate: (
+                _duration_distance(candidate, target_duration_seconds),
+                candidate["start_time_ms"],
+                candidate["id"],
+            ),
+        )
+        for candidate in in_window[:MAX_CANDIDATES_PER_WINDOW]:
+            unique[candidate["id"]] = candidate
+
+    shortlist = sorted(
+        unique.values(),
+        key=lambda candidate: (candidate["start_time_ms"], candidate["end_time_ms"], candidate["id"]),
+    )
+    if len(shortlist) > limit:
+        indices = _evenly_spaced_indices(len(shortlist), limit)
+        shortlist = [shortlist[index] for index in indices]
+    if stats is not None:
+        stats["windows_analyzed"] = len(window_indices)
+    return shortlist
+
+
+def _evenly_spaced_indices(length: int, limit: int) -> list[int]:
+    if limit >= length:
+        return list(range(length))
     if limit == 1:
-        return [shortlist[0]]
+        return [0]
+    return [round(index * (length - 1) / (limit - 1)) for index in range(limit)]
 
-    indices = [
-        round(index * (len(shortlist) - 1) / (limit - 1))
-        for index in range(limit)
-    ]
-    return [shortlist[index] for index in indices]
+
+def _limit_window_candidates(
+    candidates: list[dict[str, Any]],
+    limit: int,
+    target_duration_seconds: float,
+) -> list[dict[str, Any]]:
+    best_by_start: dict[int, list[dict[str, Any]]] = {}
+    for candidate in candidates:
+        best_by_start.setdefault(candidate["start_time_ms"], []).append(candidate)
+    diverse: list[dict[str, Any]] = []
+    for same_start in best_by_start.values():
+        same_start.sort(key=lambda candidate: (
+            _duration_distance(candidate, target_duration_seconds),
+            candidate["duration_seconds"],
+            candidate["end_time_ms"],
+            candidate["id"],
+        ))
+        diverse.extend(same_start[:2])
+    diverse.sort(key=lambda candidate: (
+        candidate["start_time_ms"],
+        candidate["end_time_ms"],
+        candidate["id"],
+    ))
+    if len(diverse) <= limit:
+        return diverse
+    return [diverse[index] for index in _evenly_spaced_indices(len(diverse), limit)]
 
 
 def select_non_overlapping_candidates(
     candidates: list[dict[str, Any]],
     max_clips: int = MAX_SELECTED_CLIPS,
 ) -> list[dict[str, Any]]:
-    """Choose up to two closed-narrative candidates without source overlap."""
-    clip_limit = min(max(max_clips, 0), MAX_SELECTED_CLIPS)
+    """Choose the highest-scoring non-overlapping set using weighted interval scheduling."""
+    if type(max_clips) is not int or not 0 <= max_clips <= MAX_SELECTED_CLIPS:
+        raise LocalPlanningError("Maximum clip count is invalid", reason="invalid_clip_count")
     eligible = [
         candidate
         for candidate in candidates
         if candidate["narrative_closed"] is True
+        and type(candidate.get("relevance_score")) is int
+        and candidate["relevance_score"] > 0
     ]
-    eligible.sort(
-        key=lambda candidate: (
-            -candidate["relevance_score"],
-            candidate["start_time_ms"],
-            candidate["id"],
-        )
-    )
-    if clip_limit == 0 or not eligible:
+    eligible.sort(key=lambda candidate: (
+        candidate["end_time_ms"],
+        candidate["start_time_ms"],
+        candidate["id"],
+    ))
+    if max_clips == 0 or not eligible:
         return []
-    if clip_limit == 1 or len(eligible) == 1:
-        return sorted(eligible[:1], key=lambda candidate: candidate["start_time_ms"])
-
-    pairs = [
-        (left, right)
-        for left, right in combinations(eligible, 2)
-        if (
-            left["end_time_ms"] <= right["start_time_ms"]
-            or right["end_time_ms"] <= left["start_time_ms"]
-        )
+    ends = [candidate["end_time_ms"] for candidate in eligible]
+    rows: list[list[Optional[tuple[int, tuple[dict[str, Any], ...]]]]] = [
+        [None] * (max_clips + 1) for _ in range(len(eligible) + 1)
     ]
-    if not pairs:
-        return sorted(eligible[:1], key=lambda candidate: candidate["start_time_ms"])
+    for row in rows:
+        row[0] = (0, ())
 
-    best_pair = min(
-        pairs,
-        key=lambda pair: (
-            -(pair[0]["relevance_score"] + pair[1]["relevance_score"]),
-            -max(pair[0]["relevance_score"], pair[1]["relevance_score"]),
-            min(pair[0]["start_time_ms"], pair[1]["start_time_ms"]),
-            max(pair[0]["start_time_ms"], pair[1]["start_time_ms"]),
-        ),
+    for index, candidate in enumerate(eligible, start=1):
+        compatible_count = bisect_right(ends, candidate["start_time_ms"], 0, index - 1)
+        for count in range(1, max_clips + 1):
+            best = rows[index - 1][count]
+            prior = rows[compatible_count][count - 1]
+            if prior is not None:
+                take = (
+                    prior[0] + candidate["relevance_score"],
+                    prior[1] + (candidate,),
+                )
+                if _better_selection(take, best):
+                    best = take
+            rows[index][count] = best
+
+    winner: Optional[tuple[int, tuple[dict[str, Any], ...]]] = None
+    for state in rows[-1]:
+        if state is not None and _better_selection(state, winner):
+            winner = state
+    return sorted(
+        winner[1] if winner else (),
+        key=lambda candidate: (candidate["start_time_ms"], candidate["end_time_ms"], candidate["id"]),
     )
-    return sorted(best_pair, key=lambda candidate: candidate["start_time_ms"])
+
+
+def _better_selection(
+    candidate: tuple[int, tuple[dict[str, Any], ...]],
+    current: Optional[tuple[int, tuple[dict[str, Any], ...]]],
+) -> bool:
+    if current is None or candidate[0] != current[0]:
+        return current is None or candidate[0] > current[0]
+    if len(candidate[1]) != len(current[1]):
+        return len(candidate[1]) < len(current[1])
+    candidate_key = tuple(sorted((item["start_time_ms"], item["id"]) for item in candidate[1]))
+    current_key = tuple(sorted((item["start_time_ms"], item["id"]) for item in current[1]))
+    return candidate_key < current_key
+
+
+def _candidate_limit(source_duration_seconds: Optional[float], max_clips: int) -> int:
+    duration = max(0.0, source_duration_seconds or 0.0)
+    windows = math.ceil(duration / CANDIDATE_WINDOW_STRIDE_SECONDS)
+    return min(MAX_CANDIDATES_FOR_OLLAMA, max(12, max_clips * 3, windows))
+
+
+def _ollama_request_budget(source_duration_seconds: Optional[float], max_clips: int) -> int:
+    duration = max(0.0, source_duration_seconds or 0.0)
+    budget = 4 + 2 * math.ceil(max_clips / 3) + math.ceil(duration / 300)
+    return min(MAX_OLLAMA_REQUESTS, max(8, budget))
 
 
 def _intervals_overlap(left: dict[str, Any], right: dict[str, Any]) -> bool:
@@ -282,6 +431,10 @@ class LocalPlanningService:
         self._owns_http_client = http_client is None
         self.progress_callback = progress_callback
         self.selection_diagnostics: list[dict[str, Any]] = []
+        self.planning_metrics: dict[str, Any] = {}
+        self._ollama_request_limit = 0
+        self._ollama_request_count = 0
+        self._planning_deadline: Optional[float] = None
 
     def _progress(self, message: str) -> None:
         if self.progress_callback:
@@ -294,7 +447,7 @@ class LocalPlanningService:
         self,
         transcript_result: TranscriptionResult,
         video_metadata: Any = None,
-        max_clips: Optional[int] = 2,
+        max_clips: Optional[int] = MAX_SELECTED_CLIPS,
         auto_clip_count: bool = True,
         min_duration_seconds: Optional[int] = 30,
         max_duration_seconds: Optional[int] = 60,
@@ -320,9 +473,8 @@ class LocalPlanningService:
 
         if max_clips is None:
             max_clips = MAX_SELECTED_CLIPS
-        if type(max_clips) is not int or max_clips < 0:
+        if type(max_clips) is not int or not 0 <= max_clips <= MAX_SELECTED_CLIPS:
             raise LocalPlanningError("Maximum clip count is invalid", reason="invalid_clip_count")
-        max_clips = min(max_clips, MAX_SELECTED_CLIPS)
         if not duration_ranges and min_duration_seconds is None and max_duration_seconds is None:
             min_duration_seconds, max_duration_seconds = 30, 60
 
@@ -339,18 +491,49 @@ class LocalPlanningService:
             )
             else None
         )
+        self.selection_diagnostics = []
+        self.planning_metrics = {
+            "source_duration_seconds": source_duration,
+            "candidates_discovered": 0,
+            "candidates_discarded_by_duration": 0,
+            "duplicate_candidates": 0,
+            "max_clips": max_clips,
+            "_started_at": time.perf_counter(),
+        }
+        self._ollama_request_limit = _ollama_request_budget(source_duration, max_clips)
+        self._ollama_request_count = 0
+        self._planning_deadline = self.planning_metrics["_started_at"] + MAX_PLANNING_SECONDS
         min_duration, max_duration = resolve_clip_duration_bounds(
             duration_ranges, min_duration_seconds, max_duration_seconds
         )
-        candidates = generate_candidates(
-            transcript,
-            source_duration_seconds=source_duration,
-            min_duration_seconds=min_duration,
-            max_duration_seconds=max_duration,
-            start_time_seconds=start_time_seconds,
-            end_time_seconds=end_time_seconds,
-        )
+        discovery_stats: dict[str, int] = {}
+        try:
+            candidates = generate_candidates(
+                transcript,
+                source_duration_seconds=source_duration,
+                min_duration_seconds=min_duration,
+                max_duration_seconds=max_duration,
+                start_time_seconds=start_time_seconds,
+                end_time_seconds=end_time_seconds,
+                stats=discovery_stats,
+                deadline=self._planning_deadline,
+            )
+        except LocalPlanningError as error:
+            self.planning_metrics["discovery_failure_reason"] = error.reason
+            self._finish_planning_metrics()
+            raise
+        self.planning_metrics.update({
+            "candidates_discovered": discovery_stats["candidate_intervals_generated"],
+            "candidates_retained_after_window_budget": len(candidates),
+            "candidates_discarded_by_duration": discovery_stats["duration_rejections"],
+            "candidates_discarded_by_window_budget": discovery_stats["candidates_discarded_by_window_budget"],
+            "duplicate_candidates": discovery_stats["duplicate_candidates"],
+        })
+        if discovery_stats["time_budget_exhausted"]:
+            self.planning_metrics["budget_exhausted"] = True
+            self.planning_metrics["budget_exhaustion_reason"] = "time_limit"
         if not candidates or max_clips <= 0:
+            self._finish_planning_metrics()
             return ClipPlanResponse(
                 segments=[],
                 total_clips=0,
@@ -412,6 +595,15 @@ class LocalPlanningService:
         include_preliminary: bool = False,
     ) -> list[dict[str, Any]]:
         self.selection_diagnostics = []
+        if type(max_clips) is not int or not 0 <= max_clips <= MAX_SELECTED_CLIPS:
+            raise LocalPlanningError("Maximum clip count is invalid", reason="invalid_clip_count")
+        if "_started_at" not in self.planning_metrics:
+            self.planning_metrics = {
+                "source_duration_seconds": source_duration_seconds,
+                "candidates_discovered": len(candidates),
+                "max_clips": max_clips,
+                "_started_at": time.perf_counter(),
+            }
         min_duration_seconds, max_duration_seconds = resolve_clip_duration_bounds(
             None, min_duration_seconds, max_duration_seconds
         )
@@ -429,15 +621,49 @@ class LocalPlanningService:
             start_time_seconds,
             end_time_seconds,
         )
+        duration_for_budget = source_duration_seconds
+        if duration_for_budget is None and validated:
+            duration_for_budget = max(item["end_time_ms"] for item in validated) / 1000
+        self._ollama_request_limit = _ollama_request_budget(duration_for_budget, max_clips)
+        self._ollama_request_count = 0
+        started_at = self.planning_metrics["_started_at"]
+        self._planning_deadline = started_at + MAX_PLANNING_SECONDS
+        self.planning_metrics.update({
+            "source_duration_seconds": duration_for_budget,
+            "max_clips": max_clips,
+            "ollama_request_budget": self._ollama_request_limit,
+            "planning_time_budget_seconds": MAX_PLANNING_SECONDS,
+        })
+        shortlist_stats: dict[str, int] = {}
         shortlist = shortlist_candidates(
             validated,
+            limit=_candidate_limit(duration_for_budget, max_clips),
             target_duration_seconds=(min_duration_seconds + max_duration_seconds) / 2,
+            stats=shortlist_stats,
         )
+        self.planning_metrics.update({
+            "windows_analyzed": shortlist_stats.get("windows_analyzed", 0),
+            "candidates_shortlisted": len(shortlist),
+        })
+        self.planning_metrics.setdefault("budget_exhausted", False)
         if not shortlist or max_clips <= 0:
+            self.planning_metrics.update({
+                "evaluated_candidates": 0,
+                "expanded_candidates": 0,
+                "narrative_incomplete_candidates": 0,
+                "overlap_or_duplicate_discards": 0,
+                "selected_candidates": 0,
+            })
+            self._finish_planning_metrics()
             return []
 
         self._progress(f"Evaluating {len(shortlist)} local candidates with Ollama...")
-        evaluations = await self._evaluate_candidates(shortlist, clip_request)
+        try:
+            evaluations = await self._evaluate_candidates(shortlist, clip_request)
+        except LocalPlanningError as error:
+            self.planning_metrics["evaluation_failure_reason"] = error.reason
+            self._finish_planning_metrics()
+            raise
         candidates_with_evaluations = [
             {
                 **candidate,
@@ -445,10 +671,11 @@ class LocalPlanningService:
                 "structural_valid": True,
             }
             for candidate in shortlist
+            if candidate["id"] in evaluations
         ]
         evaluated = {candidate["id"]: candidate for candidate in candidates_with_evaluations}
-        families = {}
-        pending = {}
+        families: dict[int, list[int]] = {}
+        pending: dict[int, dict[str, Any]] = {}
         for original in sorted(candidates_with_evaluations, key=lambda item: -item["relevance_score"]):
             if original["narrative_closed"] or original["relevance_score"] == 0:
                 continue
@@ -462,16 +689,28 @@ class LocalPlanningService:
                     pending[candidate_id] = variant
                 family.append(candidate_id)
             families[original["id"]] = family
+        expanded_evaluations: dict[int, dict[str, Any]] = {}
         if pending:
             self._progress(f"Evaluating {len(pending)} narrative expansions with Ollama...")
-            expanded_evaluations = await self._evaluate_candidates(list(pending.values()), clip_request)
-            evaluated.update({
-                candidate_id: {**variant, **expanded_evaluations[candidate_id], "structural_valid": True}
-                for candidate_id, variant in pending.items()
-            })
-        improved = {}
+            try:
+                expanded_evaluations = await self._evaluate_candidates(list(pending.values()), clip_request)
+            except LocalPlanningError as error:
+                self.planning_metrics["evaluation_failure_reason"] = error.reason
+                self._finish_planning_metrics()
+                raise
+            for candidate_id, evaluation in expanded_evaluations.items():
+                evaluated[candidate_id] = {
+                    **pending[candidate_id],
+                    **evaluation,
+                    "structural_valid": True,
+                }
+        improved: dict[int, dict[str, Any]] = {}
         for original in candidates_with_evaluations:
-            family = [original] + [evaluated[candidate_id] for candidate_id in families.get(original["id"], [])]
+            family = [original] + [
+                evaluated[candidate_id]
+                for candidate_id in families.get(original["id"], [])
+                if candidate_id in evaluated
+            ]
             complete = [candidate for candidate in family if candidate["narrative_closed"]]
             if complete:
                 best = min(complete, key=lambda item: (
@@ -500,6 +739,8 @@ class LocalPlanningService:
                 decision = "selected"
             elif candidate["narrative_closed"] is not True:
                 decision = "narrative_not_closed"
+            elif candidate["relevance_score"] <= 0:
+                decision = "low_relevance"
             elif any(
                 _intervals_overlap(candidate, chosen)
                 for chosen in selected
@@ -522,14 +763,30 @@ class LocalPlanningService:
             }
             for candidate in candidates_with_evaluations
         ]
+        self.planning_metrics.update({
+            "evaluated_candidates": len(candidates_with_evaluations),
+            "expanded_candidates": len(expanded_evaluations),
+            "narrative_incomplete_candidates": sum(
+                candidate["narrative_closed"] is not True
+                for candidate in candidates_with_evaluations
+            ),
+            "overlap_or_duplicate_discards": sum(
+                candidate["selection_decision"] == "overlaps_selected_candidate"
+                for candidate in candidates_with_evaluations
+            ),
+            "selected_candidates": len(selected),
+        })
         if include_preliminary:
             review = list(selected)
-            for candidate in sorted(candidates_with_evaluations, key=lambda item: -item["relevance_score"]):
-                if len(review) >= min(max_clips, MAX_SELECTED_CLIPS):
+            for candidate in sorted(
+                candidates_with_evaluations,
+                key=lambda item: (-item["relevance_score"], item["start_time_ms"], item["id"]),
+            ):
+                if len(review) >= max_clips:
                     break
                 if not any(_intervals_overlap(candidate, chosen) for chosen in review):
                     review.append(candidate)
-            return sorted(
+            result = sorted(
                 review,
                 key=lambda candidate: (
                     candidate["start_time_ms"],
@@ -537,7 +794,23 @@ class LocalPlanningService:
                     candidate["id"],
                 ),
             )
+            self.planning_metrics["returned_candidates"] = len(result)
+            self._finish_planning_metrics()
+            return result
+        self.planning_metrics["returned_candidates"] = len(selected)
+        self._finish_planning_metrics()
         return selected
+
+    def _finish_planning_metrics(self) -> None:
+        started_at = self.planning_metrics.pop("_started_at", None)
+        self.planning_metrics["ollama_calls"] = self._ollama_request_count
+        self.planning_metrics["ollama_request_budget"] = self._ollama_request_limit
+        self.planning_metrics["planning_seconds"] = round(
+            max(0.0, time.perf_counter() - started_at) if started_at is not None else 0.0,
+            3,
+        )
+        self.planning_metrics.setdefault("planning_time_budget_seconds", MAX_PLANNING_SECONDS)
+        self.planning_metrics.setdefault("budget_exhausted", False)
 
     def _get_http_client(self) -> httpx.AsyncClient:
         if self._http_client is None:
@@ -557,13 +830,35 @@ class LocalPlanningService:
         if len(candidates) > 3:
             evaluations = {}
             for index in range(0, len(candidates), 3):
+                if self._ollama_request_count >= self._ollama_request_limit:
+                    self.planning_metrics["budget_exhausted"] = True
+                    self.planning_metrics["budget_exhaustion_reason"] = "request_limit"
+                    break
                 evaluations.update(await self._evaluate_candidates(candidates[index:index + 3], clip_request))
             return evaluations
         candidate_ids = [candidate["id"] for candidate in candidates]
         payload = _build_ollama_payload(candidates, clip_request)
         for attempt in range(2):
+            if self._ollama_request_count >= self._ollama_request_limit:
+                self.planning_metrics["budget_exhausted"] = True
+                self.planning_metrics["budget_exhaustion_reason"] = "request_limit"
+                return {}
+            remaining_seconds = (
+                self._planning_deadline - time.perf_counter()
+                if self._planning_deadline is not None
+                else OLLAMA_TIMEOUT_SECONDS
+            )
+            if remaining_seconds <= 0:
+                self.planning_metrics["budget_exhausted"] = True
+                self.planning_metrics["budget_exhaustion_reason"] = "time_limit"
+                return {}
+            self._ollama_request_count += 1
             try:
-                response = await self._get_http_client().post("/api/chat", json=payload)
+                response = await self._get_http_client().post(
+                    "/api/chat",
+                    json=payload,
+                    timeout=min(OLLAMA_TIMEOUT_SECONDS, remaining_seconds),
+                )
             except httpx.ConnectError:
                 raise LocalPlanningError(
                     "Ollama is unavailable. Start Ollama and install qwen3:1.7b with `ollama pull qwen3:1.7b`.",
